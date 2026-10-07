@@ -1,0 +1,25 @@
+{
+  "name": "distributed-job-system",
+  "version": "1.0.0",
+  "description": "Fault-tolerant distributed job processing system built with Node.js, PostgreSQL, Redis and C++",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "nodemon server.js",
+    "start": "node server.js",
+    "worker": "node src/workers/worker.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@upstash/redis": "^1.39.0",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "ioredis": "^5.8.2",
+    "pg": "^8.16.3",
+    "uuid": "^13.0.0",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
