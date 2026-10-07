@@ -1,5 +1,6 @@
 import { pool } from "../config/database.js";
 import { env } from "../config/env.js";
+import { JOB_STATUS } from "../utils/job-status.js";
 
 export async function createJob({
     type,
@@ -20,7 +21,7 @@ export async function createJob({
                 max_attempts,
                 idempotency_key
             )
-            VALUES ($1, $2, 'QUEUED', $3, $4)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (idempotency_key)
             DO NOTHING
             RETURNING *
@@ -28,6 +29,7 @@ export async function createJob({
             [
                 type,
                 payload,
+                JOB_STATUS.QUEUED,
                 env.JOB_MAX_ATTEMPTS,
                 idempotencyKey
             ]
@@ -58,6 +60,26 @@ export async function createJob({
         }
 
         const job = insertResult.rows[0];
+
+        await client.query(
+            `
+            INSERT INTO outbox_events (
+                event_type,
+                aggregate_id,
+                payload
+            )
+            VALUES ($1, $2, $3)
+            `,
+            [
+                "JOB_CREATED",
+                job.id,
+                {
+                    jobId: job.id,
+                    type: job.type,
+                    payload: job.payload
+                }
+            ]
+        );
 
         await client.query("COMMIT");
 
