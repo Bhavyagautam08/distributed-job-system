@@ -8,6 +8,9 @@
     "dev": "nodemon server.js",
     "start": "node server.js",
     "worker": "node src/workers/worker.js",
+    "bench:jobs": "node benchmarks/jobs-autocannon.js",
+    "workers:start": "node benchmarks/start-worker-pool.js",
+    "workers:report": "node benchmarks/collect-workers-report.js",
     "test": "node --test"
   },
   "dependencies": {
@@ -20,6 +23,7 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
+    "autocannon": "^8.0.0",
     "nodemon": "^3.1.14"
   }
 }

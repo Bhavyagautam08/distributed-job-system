@@ -372,6 +372,8 @@
 }
 .ws-badge i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; }
 .ws-badge-healthy, .ws-badge-enabled { color: var(--ws-green); }
+.ws-badge-active { color: var(--ws-green); }
+.ws-badge-stale { color: var(--ws-yellow); }
 .ws-badge-degraded { color: var(--ws-yellow); }
 .ws-badge-offline { color: var(--ws-red); }
 .ws-badge-draining { color: var(--ws-muted); }
@@ -597,7 +599,7 @@
 
 /* Detail footer */
 .ws-detail-footer { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; padding: 11px 12px; }
-.ws-detail-footer button {
+.ws-detail-footer button, .ws-detail-footer a {
   height: 29px;
   border: 1px solid var(--ws-border);
   background: var(--ws-surface-r);
@@ -609,7 +611,7 @@
   align-items: center;
   gap: 7px;
 }
-.ws-detail-footer button:hover { border-color: #3a4852; background: var(--ws-surface-h); color: var(--ws-text); }
+.ws-detail-footer button:hover, .ws-detail-footer a:hover { border-color: #3a4852; background: var(--ws-surface-h); color: var(--ws-text); }
 
 /* ── Confirm dialog ──────────────────────────────────────── */
 .ws-dialog-backdrop {

@@ -1,5 +1,7 @@
-import { useMemo, useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { getOverview } from "./api/dashboard";
+import type { DashboardResponse, WorkerLease } from "./api/dashboard";
 import "./workers.css";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -141,49 +143,6 @@ function KpiCard({ label, value, unit, note, spark, danger = false }: {
 }
 
 // ─── Sidebar ───────────────────────────────────────────────────────────────────
-
-const NAV_ITEMS: [IconName, string, string][] = [
-  ["grid", "Command Center", "/"],
-  ["jobs", "Jobs", "/jobs"],
-  ["workers", "Workers", "/workers"],
-  ["queue", "Queue", "/queues"],
-  ["metrics", "Metrics", "#"],
-  ["system", "System", "#"],
-];
-
-function Sidebar({ activeWorkers, totalWorkers }: { activeWorkers: number; totalWorkers: number }) {
-  return (
-    <aside className="ws-sidebar">
-      <div className="ws-brand">
-        <div className="ws-brand-mark"><span /><span /><span /><span /></div>
-        <div><b>PARALLEL</b><small>CONTROL PLANE</small></div>
-      </div>
-      <nav>
-        <div className="ws-nav-label">OPERATIONS</div>
-        {NAV_ITEMS.map(([icon, label, to]) => (
-          <Link key={label} to={to} className={`ws-nav-item${label === "Workers" ? " active" : ""}`}>
-            <Icon name={icon} /><span>{label}</span>
-          </Link>
-        ))}
-      </nav>
-      <div className="ws-system-card">
-        <div className="ws-system-card-head">
-          <span><i />SYSTEM STATUS</span>
-          <b className={activeWorkers < totalWorkers && totalWorkers > 0 ? "degraded" : ""}>{activeWorkers === totalWorkers && totalWorkers > 0 ? "HEALTHY" : totalWorkers === 0 ? "OFFLINE" : "DEGRADED"}</b>
-        </div>
-        <div className="ws-system-row"><span>API</span><span>3 / 3</span></div>
-        <div className="ws-seg-bar"><i /><i /><i /></div>
-        <div className="ws-system-row"><span>WORKERS</span><span>{activeWorkers} / {totalWorkers || "—"}</span></div>
-        <div className="ws-seg-bar workers">
-          {Array.from({ length: Math.max(totalWorkers, 1) }).map((_, k) => (
-            <i key={k} className={k < activeWorkers ? "" : "inactive"} />
-          ))}
-        </div>
-        <div className="ws-region">REGION <b>us-east-1</b></div>
-      </div>
-    </aside>
-  );
-}
 
 // ─── Activity Chart ────────────────────────────────────────────────────────────
 
@@ -444,183 +403,117 @@ interface WorkersProps {
   onRestart?: (id: string) => void;
 }
 
-export default function Workers({
-  workers = [],
-  kpi = defaultKpi,
-  scaling: scalingProp = defaultScaling,
-  events = [],
-  chartPoints = [],
-  onScaleDown,
-  onScaleUp,
-  onDrain,
-  onRestart,
-}: WorkersProps) {
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+export default function Workers() {
+  const [overview, setOverview] = useState<DashboardResponse | null>(null);
   const [search, setSearch] = useState("");
-  const [updatedAt, setUpdatedAt] = useState(() => new Date().toISOString().slice(11, 19) + " UTC");
-  const [dialog, setDialog] = useState<{ action: "drain" | "restart"; workerId: string } | null>(null);
-  const [scaling, setScaling] = useState<ScalingConfig>(scalingProp);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => { setScaling(scalingProp); }, [scalingProp]);
+  async function refresh() {
+    setLoading(true);
+    try {
+      setOverview(await getOverview("15m"));
+      setError("");
+      setUpdatedAt(new Date().toLocaleTimeString());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to load worker leases");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
-    if (workers.length > 0 && !selectedId) setSelectedId(workers[0].id);
-  }, [workers, selectedId]);
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 10000);
+    return () => window.clearInterval(timer);
+  }, []);
 
-  const selected = useMemo(() => workers.find((w) => w.id === selectedId) ?? workers[0] ?? null, [workers, selectedId]);
-  const visible = useMemo(() => workers.filter((w) => `${w.id} ${w.host} ${w.status}`.toLowerCase().includes(search.toLowerCase())), [workers, search]);
-
-  const healthyCount = workers.filter((w) => w.status === "HEALTHY").length;
-  const degradedCount = workers.filter((w) => w.status === "DEGRADED").length;
-
-  const sparkBase = chartPoints.length >= 8 ? chartPoints.slice(-8) : [...Array(8 - chartPoints.length).fill(0), ...chartPoints];
-  const latSpark = sparkBase.map((v) => Math.max(100, 300 - v));
-  const failSpark = sparkBase.map((v) => Math.max(0, v * 0.02));
+  const workers: WorkerLease[] = overview?.workers ?? [];
+  const visible = workers.filter((worker) => worker.id.toLowerCase().includes(search.toLowerCase()));
+  const activeJobs = workers.reduce((total, worker) => total + worker.activeJobs, 0);
+  const chart = overview?.chart ?? [];
+  const createdMax = Math.max(1, ...chart.map((bucket) => bucket.created));
+  const failedMax = Math.max(1, ...chart.map((bucket) => bucket.failed));
+  const workerActive = (worker: WorkerLease) => Date.now() - new Date(worker.lastActivityAt).getTime() <= 60000;
 
   return (
     <div className="ws-shell">
-      {sidebarOpen && <button className="ws-scrim" onClick={() => setSidebarOpen(false)} aria-label="Close sidebar" />}
-
-      <Sidebar activeWorkers={kpi.activeWorkers} totalWorkers={kpi.totalWorkers || workers.length} />
-
       <section className="ws-workspace">
-        {/* Topbar */}
         <header className="ws-topbar">
           <div className="ws-title-block">
-            <button className="ws-mobile-menu" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Toggle nav">
-              <Icon name="menu" />
-            </button>
-            <div className="ws-eyebrow">COMPUTE / FLEET</div>
+            <div className="ws-eyebrow">COMPUTE / OBSERVED LEASES</div>
             <div className="ws-page-title" role="heading" aria-level={1}>Workers</div>
-            <div className="ws-subtitle">Distributed worker fleet and execution ownership</div>
+            <div className="ws-subtitle">Worker identities observed through currently running job leases</div>
           </div>
           <div className="ws-header-tools">
-            <label className="ws-search">
-              <Icon name="search" />
-              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search workers..." aria-label="Search workers" />
-              <kbd>⌘ K</kbd>
-            </label>
-            <button className="ws-env-btn"><i />Production <span>⌄</span></button>
-            <button className="ws-icon-btn" aria-label="Refresh" onClick={() => setUpdatedAt(new Date().toISOString().slice(11, 19) + " UTC")}>
-              <Icon name="refresh" />
-            </button>
-            <div className="ws-updated"><span>LAST UPDATED</span><b>{updatedAt}</b></div>
+            <label className="ws-search"><Icon name="search" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search observed workers..." aria-label="Search workers" /></label>
+            <button className="ws-icon-btn" aria-label="Refresh" onClick={() => void refresh()} disabled={loading}><Icon name="refresh" /></button>
+            <div className="ws-updated"><span>LAST UPDATED</span><b>{updatedAt ?? "—"}</b></div>
           </div>
         </header>
-
         <div className="ws-content">
-          {/* KPI row */}
+          {error && <div className="ws-panel" role="alert" style={{ padding: "1rem", marginBottom: "1rem" }}>Worker lease data could not be loaded: {error}</div>}
           <div className="ws-kpi-grid">
-            <KpiCard label="ACTIVE WORKERS" value={kpi.activeWorkers}
-              note={<><span className="ws-pos-dot" />{kpi.healthyWorkers} healthy</>}
-              spark={sparkBase} />
-            <KpiCard label="JOBS / SEC" value={kpi.jobsPerSec.toFixed(1)}
-              note={<span className="ws-positive">{kpi.jobsPerSecTrend >= 0 ? "↗" : "↘"} {Math.abs(kpi.jobsPerSecTrend).toFixed(1)}%</span>}
-              spark={sparkBase} />
-            <KpiCard label="AVG PROCESSING TIME" value={kpi.avgProcessingMs} unit="ms"
-              note={<span>P95 <b>{kpi.p95ProcessingMs} ms</b></span>}
-              spark={latSpark} />
-            <KpiCard label="FAILED JOBS" value={kpi.failedJobs}
-              note={<span><b className="ws-danger">{kpi.failureRate.toFixed(1)}%</b> failure rate</span>}
-              spark={failSpark} danger />
+            <KpiCard label="OBSERVED WORKERS" value={workers.length} note="Distinct active job owners" spark={chart.map((bucket) => bucket.created)} />
+            <KpiCard label="RUNNING JOBS" value={activeJobs} note="Currently locked in PostgreSQL" spark={chart.map((bucket) => bucket.created)} />
+            <KpiCard label="QUEUED JOBS" value={overview?.counts.QUEUED ?? "—"} note="Current database count" spark={chart.map((bucket) => bucket.created)} />
+            <KpiCard label="FAILED JOBS" value={overview?.counts.FAILED ?? "—"} note="Current database count" spark={chart.map((bucket) => bucket.failed)} danger />
           </div>
-
-          {/* Main 2-col grid */}
           <div className="ws-main-grid">
             <div className="ws-left-col">
-              {/* Fleet table */}
               <section className="ws-panel ws-fleet-panel">
-                <div className="ws-panel-head">
-                  <div>
-                    <div className="ws-panel-title">Worker Fleet</div>
-                    <p>{workers.length} instance{workers.length !== 1 ? "s" : ""}{workers.length === 0 ? " — awaiting registration" : ""}</p>
-                  </div>
-                  <div className="ws-fleet-summary">
-                    {healthyCount > 0 && <span><i className="healthy-dot" />{healthyCount} healthy</span>}
-                    {degradedCount > 0 && <span><i className="degraded-dot" />{degradedCount} degraded</span>}
-                  </div>
-                </div>
-
+                <div className="ws-panel-head"><div><div className="ws-panel-title">Observed Worker Leases</div><p>Derived from RUNNING jobs; this is not a worker registry</p></div><Link className="ws-text-btn" to="/jobs?status=RUNNING">VIEW RUNNING JOBS</Link></div>
                 <div className="ws-table-wrap">
                   <table>
-                    <thead>
-                      <tr>
-                        <th>STATUS</th><th>WORKER ID</th><th>HOST / CONTAINER</th>
-                        <th>VERSION</th><th>JOBS PROCESSED</th><th>ACTIVE JOB</th>
-                        <th>THROUGHPUT</th><th>CPU</th><th>MEMORY</th>
-                        <th>LAST HEARTBEAT</th><th>UPTIME</th><th />
-                      </tr>
-                    </thead>
+                    <thead><tr><th>LEASE STATE</th><th>LOCK OWNER</th><th>ACTIVE JOBS</th><th>LAST JOB ACTIVITY</th></tr></thead>
                     <tbody>
-                      {visible.length === 0 && (
-                        <tr><td colSpan={12} className="ws-empty-row">
-                          {workers.length === 0 ? "No workers registered yet" : "No workers match your search"}
-                        </td></tr>
-                      )}
-                      {visible.map((w) => (
-                        <tr key={w.id}
-                          className={[selected?.id === w.id ? "selected" : "", w.status === "DEGRADED" ? "degraded-row" : ""].filter(Boolean).join(" ")}
-                          onClick={() => setSelectedId(w.id)}>
-                          <td><WSBadge value={w.status} /></td>
-                          <td><strong>{w.id}</strong></td>
-                          <td>{w.host}</td>
-                          <td>{w.version}</td>
-                          <td>{w.jobsProcessed.toLocaleString()}</td>
-                          <td>{w.activeJob ? <span className="ws-job-link">{w.activeJob.slice(0, 14)}…</span> : <span className="ws-no-job">—</span>}</td>
-                          <td>{w.throughput.toFixed(1)} <small>jobs/s</small></td>
-                          <td>
-                            <div className="ws-cell-meter">
-                              <span>{w.cpu}%</span>
-                              <Meter value={w.cpu} warning={w.cpu > 80} />
-                            </div>
-                          </td>
-                          <td>{w.memoryMb} <small>MB</small></td>
-                          <td className={w.status === "DEGRADED" ? "warn-text" : ""}>{fmtHeartbeat(w.lastHeartbeatMs)}</td>
-                          <td>{fmtUptime(w.uptimeMs)}</td>
-                          <td><Icon name="chevron" size={14} /></td>
-                        </tr>
-                      ))}
+                      {visible.length === 0 && <tr><td colSpan={4} className="ws-empty-row">{loading ? "Loading observed leases…" : workers.length ? "No workers match your search" : "No running job leases observed"}</td></tr>}
+                      {visible.map((worker) => {
+                        const ageSeconds = Math.max(0, Math.floor((Date.now() - new Date(worker.lastActivityAt).getTime()) / 1000));
+                        const state = workerActive(worker) ? "ACTIVE" : "STALE";
+                        return <tr key={worker.id}>
+                          <td><span className={`ws-badge ws-badge-${state.toLowerCase()}`}><i />{state}</span></td>
+                          <td><strong>{worker.id}</strong></td>
+                          <td>{worker.jobIds.map((jobId) => <Link className="ws-job-link" key={jobId} to={`/jobs/${jobId}`}>{jobId}</Link>)}</td>
+                          <td>{ageSeconds < 60 ? `${ageSeconds}s ago` : `${Math.floor(ageSeconds / 60)}m ago`}</td>
+                        </tr>;
+                      })}
                     </tbody>
                   </table>
                 </div>
-
-                <div className="ws-table-footer">
-                  <span>Showing {visible.length} of {workers.length} workers</span>
-                  <span>Fleet throughput <b>{kpi.jobsPerSec.toFixed(1)} jobs/s</b></span>
-                </div>
               </section>
-
-              {/* Lower grid */}
               <div className="ws-lower-grid">
-                <ActivityChart chartPoints={chartPoints} currentVal={kpi.jobsPerSec} />
-                <ScalingPanel config={scaling}
-                  onDown={() => { setScaling((s) => ({ ...s, desired: Math.max(s.minimum, s.desired - 1) })); onScaleDown?.(); }}
-                  onUp={() => { setScaling((s) => ({ ...s, desired: Math.min(s.maximum, s.desired + 1) })); onScaleUp?.(); }} />
-                <EventFeed events={events} />
+                <section className="ws-panel ws-activity-panel">
+                  <div className="ws-panel-head compact"><div><div className="ws-panel-title">Database Job Activity</div><p>Created and failed jobs · last 15 minutes</p></div></div>
+                  {chart.length > 0 ? <svg viewBox="0 0 640 150" role="img" aria-label="Created and failed jobs in fifteen buckets">
+                    <polyline points={chart.map((bucket, index) => `${index * 640 / Math.max(chart.length - 1, 1)},${140 - bucket.created * 120 / createdMax}`).join(" ")} fill="none" stroke="var(--ws-accent)" strokeWidth="2" />
+                    <polyline points={chart.map((bucket, index) => `${index * 640 / Math.max(chart.length - 1, 1)},${140 - bucket.failed * 120 / failedMax}`).join(" ")} fill="none" stroke="var(--ws-red)" strokeWidth="2" />
+                  </svg> : <div className="ws-empty-events">{loading ? "Loading job activity…" : "No chart data available"}</div>}
+                  <div className="ws-chart-legend"><span><i className="ws-line-key" />CREATED JOBS</span><span><i className="ws-line-key ws-danger" />FAILED JOBS</span></div>
+                </section>
+                <section className="ws-panel ws-scaling-panel">
+                  <div className="ws-panel-head compact"><div><div className="ws-panel-title">Worker Controls</div><p>No worker registry/control API is available</p></div></div>
+                  <p className="ws-scaling-note">This service can observe job lock owners and lease activity only. CPU, memory, scaling, restart, and drain controls are not exposed by the backend.</p>
+                </section>
               </div>
             </div>
-
-            {/* Detail panel */}
-            {selected ? (
-              <WorkerDetail worker={selected} onAction={(a) => setDialog({ action: a, workerId: selected.id })} />
-            ) : (
-              <aside className="ws-detail-panel ws-panel ws-detail-empty">
-                <Icon name="workers" size={32} />
-                <p>Select a worker to see details</p>
-              </aside>
-            )}
+            <aside className="ws-detail-panel ws-panel">
+              <div className="ws-detail-head"><div><div className="ws-detail-id">Lease Data</div><div className="ws-detail-host">Source: running jobs in PostgreSQL</div></div></div>
+              <div className="ws-detail-section">
+                <div className="ws-section-label">AVAILABLE FIELDS</div>
+                <div className="ws-detail-grid">
+                  <InfoCell label="WORKER ID" value="locked_by" />
+                  <InfoCell label="ACTIVE JOBS" value="Job IDs and count" />
+                  <InfoCell label="ACTIVITY TIME" value="Latest job update" />
+                  <InfoCell label="STALE HEURISTIC" value="No activity for 60s" />
+                </div>
+              </div>
+              <div className="ws-detail-footer"><Link to="/queues">View queue state <Icon name="external" size={13} /></Link><Link to="/system">System health <Icon name="external" size={13} /></Link></div>
+            </aside>
           </div>
         </div>
       </section>
-
-      {dialog && (
-        <ConfirmDialog
-          action={dialog.action}
-          workerId={dialog.workerId}
-          onClose={() => setDialog(null)}
-          onConfirm={() => { if (dialog.action === "drain") onDrain?.(dialog.workerId); else onRestart?.(dialog.workerId); }}
-        />
-      )}
     </div>
   );
 }

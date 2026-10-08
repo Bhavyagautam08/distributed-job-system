@@ -1,5 +1,9 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useState, type ReactNode } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { getOverview } from "./api/dashboard";
+import type { Job as ApiJob } from "./api/jobs";
+import { getHealth, getReady, subscribeToRequestMetrics } from "./api/system";
+import type { HealthResponse, ReadyResponse } from "./api/system";
 
 type IconName =
   | "activity" | "alert" | "bell" | "bolt" | "box" | "chart" | "check"
@@ -48,18 +52,10 @@ function Button({ children, variant = "secondary", icon, onClick, loading, type 
   </button>;
 }
 
-type Worker = { id: string; cpu: number; jobs: number; status: "Healthy" | "Busy" | "Offline"; heartbeat: number };
-type JobStatus = "SUCCESS" | "RUNNING" | "RETRYING" | "FAILED" | "QUEUED";
-type Job = { status: JobStatus; id: string; type: string; worker: string; attempt: string; age: number; duration: string };
+type Worker = { id: string; jobs: number; status: "ACTIVE" | "STALE"; heartbeat: number };
+type JobStatus = "SUCCESS" | "RUNNING" | "FAILED" | "QUEUED" | "CANCELLED";
+type Job = { status: JobStatus; id: string; type: string; worker: string; attempt: string; age: number; duration: string; idempotencyKey: string };
 type EventLog = { type: string; text: string; time: string; tone: string };
-
-const baseWorkers: Worker[] = [];
-
-const baseJobs: Job[] = [];
-
-const initialEvents: EventLog[] = [];
-
-const chartSeed: number[] = Array(15).fill(0);
 
 function StatusBadge({ status }: { status: string }) {
   return <span className={`badge badge-${status.toLowerCase()}`}><i />{status}</span>;
@@ -78,75 +74,77 @@ function MetricCard({ label, value, detail, icon, tone = "normal", trend }: {
   </section>;
 }
 
-function ThroughputChart({ values, range, setRange }: { values: number[]; range: string; setRange: (v: string) => void }) {
+function ThroughputChart({ values, failedValues, range, setRange }: { values: number[]; failedValues: number[]; range: string; setRange: (v: string) => void }) {
   const width = 760, height = 220;
-  const points = values.map((v, i) => `${(i / (values.length - 1)) * width},${height - ((v - 1300) / 800) * height}`).join(" ");
-  const failed = values.map((v, i) => `${(i / (values.length - 1)) * width},${height - (22 + ((v + i * 9) % 28))}`).join(" ");
+  const rangeMinutes: Record<string, number> = { "5m": 5, "15m": 15, "1h": 60, "6h": 360, "24h": 1440 };
+  const minutes = rangeMinutes[range] ?? 15;
+  const timeLabel = (fraction: number) => new Date(Date.now() - minutes * 60000 * (1 - fraction)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const maxValue = Math.max(...values, ...failedValues, 1);
+  const points = values.map((v, i) => `${(i / Math.max(values.length - 1, 1)) * width},${height - (v / maxValue) * height}`).join(" ");
+  const failed = failedValues.map((v, i) => `${(i / Math.max(failedValues.length - 1, 1)) * width},${height - (v / maxValue) * height}`).join(" ");
   const area = `0,${height} ${points} ${width},${height}`;
   return <section className="card chart-card">
     <div className="card-head">
-      <div><div className="section-title">Job Throughput <span className="live-tag"><i />LIVE</span></div><div className="section-subtitle">Processed jobs per minute</div></div>
+      <div><div className="section-title">Job Throughput</div><div className="section-subtitle">Jobs created and failed per bucket</div></div>
       <div className="range-control">{["5m", "15m", "1h", "6h", "24h"].map(r => <button key={r} onClick={() => setRange(r)} className={range === r ? "active" : ""}>{r}</button>)}</div>
     </div>
     <div className="chart-wrap">
-      <div className="y-axis"><span>2.1k</span><span>1.8k</span><span>1.5k</span><span>1.2k</span></div>
+      <div className="y-axis"><span>{maxValue}</span><span>{Math.round(maxValue * .66)}</span><span>{Math.round(maxValue * .33)}</span><span>0</span></div>
       <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label="Live job throughput chart">
         <defs><linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#6C8CFF" stopOpacity=".2" /><stop offset="1" stopColor="#6C8CFF" stopOpacity="0" /></linearGradient></defs>
         {[0, 73, 146, 219].map(y => <line key={y} x1="0" y1={y} x2={width} y2={y} className="gridline" />)}
         <polygon points={area} fill="url(#chartFill)" />
         <polyline points={points} className="processed-line" />
         <polyline points={failed} className="failed-line" />
-        {(() => { const [x, y] = points.split(" ").at(-1)!.split(","); return <><circle cx={x} cy={y} r="8" className="point-pulse" /><circle cx={x} cy={y} r="3.5" className="point" /></>; })()}
+        {points && (() => { const [x, y] = points.split(" ").at(-1)!.split(","); return <><circle cx={x} cy={y} r="8" className="point-pulse" /><circle cx={x} cy={y} r="3.5" className="point" /></>; })()}
       </svg>
-      <div className="x-axis"><span>12:30</span><span>12:35</span><span>12:40</span><span>Now</span></div>
+      <div className="x-axis"><span>{timeLabel(0)}</span><span>{timeLabel(1 / 3)}</span><span>{timeLabel(2 / 3)}</span><span>Now</span></div>
     </div>
-    <div className="chart-legend"><span><i className="line-blue" />Processed</span><span><i className="line-red" />Failed</span></div>
+    <div className="chart-legend"><span><i className="line-blue" />Created</span><span><i className="line-red" />Failed</span></div>
   </section>;
 }
 
-function QueueVisualization({ queued, active, pending = 0, delayed = 0, dead = 0 }: { queued: number; active: number; pending?: number; delayed?: number; dead?: number }) {
+function QueueVisualization({ queued, active, failed }: { queued: number; active: number; failed: number }) {
   return <section className="card queue-card">
     <div className="card-head">
-      <div><div className="section-title">Queue Health</div><div className="section-subtitle">Redis Stream <code>job-events</code> · Group <code>job-workers</code></div></div>
-      <span className="delivery">At-least-once delivery <span title="Jobs may be delivered more than once. Workers use idempotency keys to prevent duplicate effects.">?</span></span>
+      <div><div className="section-title">Queue Health</div><div className="section-subtitle">PostgreSQL job and outbox state</div></div>
+      <span className="delivery">Transactional outbox</span>
     </div>
     <div className="queue-stats">
-      <div><span>Queue depth</span><strong>{queued}</strong></div><div><span>Pending</span><strong>{pending}</strong></div>
-      <div><span>Processing</span><strong>{active}</strong></div><div><span>Delayed</span><strong>{delayed}</strong></div>
-      <div><span>Dead / failed</span><strong className="danger-text">{dead}</strong></div>
+      <div><span>Queued</span><strong>{queued}</strong></div>
+      <div><span>Running</span><strong>{active}</strong></div>
+      <div><span>Failed</span><strong className="danger-text">{failed}</strong></div>
     </div>
     <div className="pipeline">
-      {["Producer", "Redis Stream", "Consumer Group", "Workers"].map((label, i) => <div className="pipe-stage" key={label}>
+      {["API", "PostgreSQL", "Outbox", "Workers"].map((label, i) => <div className="pipe-stage" key={label}>
         <div className="stage-icon"><Icon name={i === 0 ? "plus" : i === 1 ? "database" : i === 2 ? "queue" : "server"} /></div>
         <span>{label}</span>{i < 3 && <Icon name="chevron" className="pipe-arrow" />}
       </div>)}
-      <div className="moving-job job-a" /><div className="moving-job job-b" /><div className="moving-job job-c" />
     </div>
-    <div className="branch"><span>RETRY</span><div className="branch-line" /><span className="failed-node">FAILED</span><small>exponential backoff + jitter</small></div>
+    <div className="branch"><span>FAILED</span><div className="branch-line" /><span className="failed-node">RETRY</span><small>Job retry endpoint</small></div>
   </section>;
 }
 
 function WorkerFleet({ workers }: { workers: Worker[] }) {
-  const activeCount = workers.filter(w => w.status !== "Offline").length;
-  const healthyCount = workers.filter(w => w.status === "Healthy").length;
+  const activeCount = workers.filter(w => w.status === "ACTIVE").length;
+  const staleCount = workers.filter(w => w.status === "STALE").length;
   const total = workers.length;
 
   return <section className="card worker-card">
-    <div className="card-head"><div><div className="section-title">Worker Fleet</div><div className="section-subtitle">{activeCount} of {total} active workers</div></div><span className="healthy-summary"><i />{healthyCount} healthy</span></div>
-    <div className="worker-columns"><span>WORKER</span><span>CPU</span><span>JOBS</span><span>HEARTBEAT</span><span>STATE</span></div>
+    <div className="card-head"><div><div className="section-title">Observed Worker Leases</div><div className="section-subtitle">{activeCount} active · {staleCount} stale</div></div><span className="healthy-summary"><i />From running jobs</span></div>
+    <div className="worker-columns"><span>WORKER</span><span>ACTIVE JOBS</span><span>LAST ACTIVITY</span><span>STATE</span></div>
     <div className="worker-list">
-      {workers.length === 0 && <div className="empty-state" style={{ padding: '1rem', color: '#666', textAlign: 'center' }}>No workers registered</div>}
+      {workers.length === 0 && <div className="empty-state" style={{ padding: '1rem', color: '#666', textAlign: 'center' }}>No active worker leases observed</div>}
       {workers.map(w => <div className="worker-row" key={w.id}>
-      <code>{w.id}</code><div className="cpu"><span><i style={{ width: `${w.cpu}%` }} /></span><em>{w.cpu}%</em></div>
-      <strong>{w.jobs}</strong><span className="heartbeat">{w.heartbeat}s ago</span><StatusBadge status={w.status} />
+      <code>{w.id}</code><strong>{w.jobs}</strong><span className="heartbeat">{w.heartbeat}s ago</span><StatusBadge status={w.status} />
     </div>)}</div>
-    <button className="text-action">View all workers <span>→</span></button>
+    <Link className="text-action" to="/workers">View worker leases <span>→</span></Link>
   </section>;
 }
 
 function RecentJobs({ jobs, onSelect }: { jobs: Job[]; onSelect: (job: Job) => void }) {
   return <section className="card jobs-card">
-    <div className="card-head"><div><div className="section-title">Recent Job Activity</div><div className="section-subtitle">Durable state from PostgreSQL</div></div><div className="table-actions"><button><Icon name="search" /> Filter</button><button>Created ↓</button></div></div>
+    <div className="card-head"><div><div className="section-title">Recent Job Activity</div><div className="section-subtitle">Durable state from PostgreSQL</div></div><Link className="text-action" to="/jobs">All jobs <span>→</span></Link></div>
     <div className="table-scroll"><table><thead><tr><th>STATUS</th><th>JOB ID</th><th>TYPE</th><th>WORKER</th><th>ATTEMPT</th><th>CREATED</th><th>DURATION</th></tr></thead>
       <tbody>
         {jobs.length === 0 && <tr><td colSpan={7} style={{ textAlign: "center", padding: "1rem", color: "#666" }}>No recent jobs</td></tr>}
@@ -159,7 +157,7 @@ function RecentJobs({ jobs, onSelect }: { jobs: Job[]; onSelect: (job: Job) => v
 
 function LiveEvents({ events }: { events: EventLog[] }) {
   return <section className="card events-card">
-    <div className="card-head"><div><div className="section-title">Live Events <span className="live-tag"><i />LIVE</span></div><div className="section-subtitle">Redis Stream telemetry</div></div><button className="icon-btn" aria-label="Event visibility"><Icon name="eye" /></button></div>
+    <div className="card-head">    <div><div className="section-title">Recent Outbox Events</div><div className="section-subtitle">Persisted event publication state</div></div><Link className="icon-btn" to="/queues" aria-label="View queue events"><Icon name="eye" /></Link></div>
     <div className="event-feed">
       {events.length === 0 && <div className="empty-state" style={{ padding: '1rem', color: '#666', textAlign: 'center' }}>Awaiting events...</div>}
       {events.map((e, i) => <div className={`event-item ${i === 0 ? "new-event" : ""}`} key={`${e.time}-${e.type}-${i}`}>
@@ -169,114 +167,167 @@ function LiveEvents({ events }: { events: EventLog[] }) {
   </section>;
 }
 
-const nav = [
-  { group: "OVERVIEW", items: [["Command Center", "grid"]] },
-  { group: "JOBS", items: [["All Jobs", "jobs"], ["Create Job", "plus"], ["Retry Queue", "retry"], ["Failed Jobs", "alert"]] },
-  { group: "INFRASTRUCTURE", items: [["Workers", "users"], ["Queue", "queue"], ["Events", "event"]] },
-  { group: "OBSERVABILITY", items: [["Metrics", "chart"], ["System Health", "heart"]] },
-  { group: "SYSTEM", items: [["Settings", "settings"]] },
-] as const;
-
-function Sidebar({ open, close }: { open: boolean; close: () => void }) {
-  return <><aside className={`sidebar ${open ? "open" : ""}`}>
-    <div className="brand"><div className="brand-mark"><span /><span /><span /></div><div><strong>JobMesh</strong><small>Distributed Job Processing</small></div><button onClick={close} className="mobile-close"><Icon name="x" /></button></div>
-    <nav>{nav.map(section => <div className="nav-section" key={section.group}><div className="nav-label">{section.group}</div>{section.items.map(([label, icon]) => {
-      const isJobs = label === "All Jobs";
-      const isCmd = label === "Command Center";
-      const isWorkers = label === "Workers";
-      const isQueue = label === "Queue";
-      const to = isJobs ? "/jobs" : isCmd ? "/" : isWorkers ? "/workers" : isQueue ? "/queues" : "#";
-      return <Link to={to} className={`nav-item ${isCmd ? "selected" : ""}`} key={label}><Icon name={icon as IconName} /><span>{label}</span></Link>;
-    })}</div>)}</nav>
-    <div className="side-health"><div className="operational"><i />SYSTEMS STATUS</div>{[["API", "—"], ["Postgres", "—"], ["Redis", "—"], ["Workers", "—"]].map(([a, b]) => <div key={a}><span>{a}</span><strong>{b}</strong></div>)}</div>
-  </aside>{open && <button className="scrim" onClick={close} aria-label="Close navigation" />}</>;
+function HealthStrip({ health, ready, workers, outbox }: {
+  health: HealthResponse | null;
+  ready: ReadyResponse | null;
+  workers: number;
+  outbox: number | null;
+}) {
+  const items = [
+    ["API", health ? "Healthy" : "Unavailable", health ? "Reachable" : "Health check failed"],
+    ["PostgreSQL", ready?.checks.database.toUpperCase() ?? "Unknown", "Readiness probe"],
+    ["Redis", ready?.checks.redis.toUpperCase() ?? "Unknown", "Readiness probe"],
+    ["Workers", `${workers} observed`, "Active job leases"],
+    ["Outbox", outbox === null ? "Unknown" : `${outbox} pending`, "Unpublished events"]
+  ];
+  return <section className="health-strip">{items.map(([name, state, detail]) => <div className="health-unit" key={name}>
+    <div><Icon name={name === "PostgreSQL" || name === "Redis" ? "database" : name === "Workers" ? "users" : name === "Outbox" ? "box" : "heart"} /><span>{name}</span></div>
+    <strong><i />{state}</strong><small>{detail}</small>
+  </div>)}</section>;
 }
 
-type HealthStats = { apiLatency: string; pgPool: string; redisLatency: string; workersActive: string; outboxEvents: string; lastReconciliation: string; };
-const defaultHealthStats: HealthStats = { apiLatency: "—", pgPool: "—", redisLatency: "—", workersActive: "—", outboxEvents: "—", lastReconciliation: "—" };
-
-function HealthStrip({ degraded, stats = defaultHealthStats }: { degraded: boolean, stats?: HealthStats }) {
-  const items = [
-    ["API Servers", `Latency ${stats.apiLatency}`], ["PostgreSQL", `Pool ${stats.pgPool}`], ["Redis", `Latency ${stats.redisLatency}`],
-    ["Workers", `${stats.workersActive} active`], ["Outbox", `${stats.outboxEvents} overdue events`], ["Reconciliation", `Last run ${stats.lastReconciliation}`],
-  ];
-  return <section className="health-strip">{items.map(([name, detail]) => <div className="health-unit" key={name}><div><Icon name={name === "PostgreSQL" || name === "Redis" ? "database" : name === "Workers" ? "users" : name === "Outbox" ? "box" : "heart"} /><span>{name}</span></div><strong className={degraded && name === "Redis" ? "warning-text" : ""}><i />{degraded && name === "Redis" ? "Degraded" : "Healthy"}</strong><small>{detail}</small></div>)}</section>;
+function toRecentJob(job: ApiJob): Job {
+  const age = Math.max(0, Math.floor((Date.now() - new Date(job.created_at).getTime()) / 1000));
+  const duration = job.started_at && job.completed_at
+    ? `${((new Date(job.completed_at).getTime() - new Date(job.started_at).getTime()) / 1000).toFixed(2)} s`
+    : "—";
+  return {
+    status: job.status,
+    id: job.id,
+    type: job.type,
+    worker: job.locked_by ?? "—",
+    attempt: `${job.attempt_count} / ${job.max_attempts}`,
+    age,
+    duration,
+    idempotencyKey: job.idempotency_key
+  };
 }
 
 function App() {
-  const [tick, setTick] = useState(0);
+  const navigate = useNavigate();
   const [queued, setQueued] = useState(0);
   const [active, setActive] = useState(0);
   const [throughput, setThroughput] = useState(0);
   const [success, setSuccess] = useState(0);
   const [failed, setFailed] = useState(0);
-  const [p99, setP99] = useState(0);
-  const [workers, setWorkers] = useState<Worker[]>(baseWorkers);
-  const [jobs, setJobs] = useState<Job[]>(baseJobs);
-  const [events, setEvents] = useState<EventLog[]>(initialEvents);
-  const [chart, setChart] = useState<number[]>(chartSeed);
+  const [averageLatency, setAverageLatency] = useState(0);
+  const [workers, setWorkers] = useState<Worker[]>([]);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [events, setEvents] = useState<EventLog[]>([]);
+  const [chart, setChart] = useState<number[]>([]);
+  const [failedChart, setFailedChart] = useState<number[]>([]);
   const [range, setRange] = useState("15m");
   const [refreshing, setRefreshing] = useState(false);
-  const [createOpen, setCreateOpen] = useState(false);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const degraded = false;
-  const workerOffline = false;
+  const [healthData, setHealthData] = useState<HealthResponse | null>(null);
+  const [readyData, setReadyData] = useState<ReadyResponse | null>(null);
+  const [outboxPending, setOutboxPending] = useState<number | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const [quickSearch, setQuickSearch] = useState("");
+  const [metricsStreamConnected, setMetricsStreamConnected] = useState(false);
 
-  const submitJob = () => {
-    const job: Job = { status: "QUEUED", id: "c7e2...b19", type: "process_json", worker: "—", attempt: "1/3", age: 0, duration: "—" };
-    setJobs(js => [job, ...js].slice(0, 6)); setQueued(q => q + 1); setCreateOpen(false);
-    setEvents(e => [{ type: "JOB_CREATED", text: "job c7e2...b19 persisted and queued", time: new Date().toLocaleTimeString("en-US", { hour12: false }), tone: "info" }, ...e].slice(0, 7));
+  const fetchRealData = async () => {
+    setRefreshing(true);
+    const results = await Promise.allSettled([
+      getHealth(),
+      getReady(),
+      getOverview(range)
+    ]);
+    const [healthResult, readyResult, overviewResult] = results;
+    const health = healthResult.status === "fulfilled" ? healthResult.value : null;
+    const ready = readyResult.status === "fulfilled" ? readyResult.value : null;
+    const overview = overviewResult.status === "fulfilled" ? overviewResult.value : null;
+    setHealthData(health);
+    setReadyData(ready);
+    if (overview) {
+      setQueued(overview.counts.QUEUED ?? 0);
+      setActive(overview.counts.RUNNING ?? 0);
+      setFailed(overview.counts.FAILED ?? 0);
+      setJobs(overview.jobs.map(toRecentJob));
+      setEvents(overview.events.map((event) => ({
+        type: event.event_type,
+        text: `job ${event.aggregate_id}`,
+        time: new Date(event.created_at).toLocaleTimeString(),
+        tone: event.event_type.includes("FAILED") ? "warning" : event.event_type.includes("COMPLETED") ? "success" : "info"
+      })));
+      const observedAt = Date.now();
+      setWorkers(overview.workers.map((worker) => {
+        const heartbeat = Math.max(0, Math.floor((observedAt - new Date(worker.lastActivityAt).getTime()) / 1000));
+        const status: Worker["status"] = heartbeat > 60 ? "STALE" : "ACTIVE";
+        return { id: worker.id, jobs: worker.activeJobs, heartbeat, status };
+      }));
+      setChart(overview.chart.map((bucket) => bucket.created));
+      setFailedChart(overview.chart.map((bucket) => bucket.failed));
+      setOutboxPending(overview.unpublishedOutboxEvents);
+    }
+    const errors = results.flatMap((result) => result.status === "rejected"
+      ? [result.reason instanceof Error ? result.reason.message : "Request failed"]
+      : []);
+    setLoadError(errors.join("; "));
+    setLastUpdated(new Date().toLocaleTimeString());
+    setRefreshing(false);
   };
-  const refresh = () => { setRefreshing(true); window.setTimeout(() => setRefreshing(false), 700); setTick(t => t + 1); };
-  const activeWorkers = useMemo(() => workerOffline ? 11 : 12, [workerOffline]);
+
+  useEffect(() => {
+    void fetchRealData();
+    const interval = setInterval(() => {
+      void fetchRealData();
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [range]);
+
+  useEffect(() => subscribeToRequestMetrics((requestMetrics) => {
+    setThroughput(requestMetrics.total);
+    setSuccess(requestMetrics.successful);
+    setAverageLatency(requestMetrics.averageLatencyMs);
+    setMetricsStreamConnected(true);
+  }, () => setMetricsStreamConnected(false)), []);
+
+  const degraded = (healthData !== null && healthData.status !== "healthy")
+    || (readyData !== null && (readyData.checks.database !== "up" || readyData.checks.redis !== "up"));
+  const activeWorkers = workers.filter((worker) => worker.status === "ACTIVE").length;
+  const refresh = () => { void fetchRealData(); };
 
   return <div className="app-shell">
-    <Sidebar open={sidebarOpen} close={() => setSidebarOpen(false)} />
     <main className="main">
       <header className="topbar">
-        <div className="crumbs"><button className="mobile-menu" onClick={() => setSidebarOpen(true)}><Icon name="menu" /></button><span>Overview</span><Icon name="chevron" size={13} /><strong>Command Center</strong></div>
-        <div className="global-search"><Icon name="search" /><input aria-label="Global search" placeholder="Search jobs, workers, events..." /><kbd>⌘ K</kbd></div>
-        <div className="top-actions"><button className="environment"><i />PRODUCTION <span>⌄</span></button><span className="synced"><Icon name="refresh" />Synced 2 sec ago</span><button className="icon-btn bell"><Icon name="bell" /><i /></button><button className="avatar">AK</button></div>
+        <div className="crumbs"><span>Overview</span><Icon name="chevron" size={13} /><strong>Command Center</strong></div>
+        <form className="global-search" onSubmit={(event) => { event.preventDefault(); navigate(`/jobs?search=${encodeURIComponent(quickSearch)}`); }}>
+          <Icon name="search" /><input aria-label="Search jobs" value={quickSearch} onChange={(event) => setQuickSearch(event.target.value)} placeholder="Search jobs, IDs, idempotency keys..." /><kbd>Enter</kbd>
+        </form>
+        <div className="top-actions"><span className="synced"><Icon name="refresh" />{lastUpdated ? `Updated ${lastUpdated}` : "Connecting…"}</span><Link className="icon-btn" to="/system" aria-label="System status"><Icon name="settings" /></Link></div>
       </header>
       <div className="content">
         <div className="page-header">
           <div><h1>Command Center</h1><p>Real-time overview of distributed job processing.</p></div>
-          <div className="page-actions"><Button icon="refresh" onClick={refresh} loading={refreshing}>Refresh</Button><Button variant="primary" icon="plus" onClick={() => setCreateOpen(true)}>Create Job</Button></div>
+          <div className="page-actions"><Button icon="refresh" onClick={refresh} loading={refreshing}>Refresh</Button><Link to="/jobs/create" style={{ textDecoration: 'none' }}><Button variant="primary" icon="plus">Create Job</Button></Link></div>
         </div>
 
-        {(degraded || workerOffline) && <div className={`alert-banner ${workerOffline ? "critical" : ""}`}><Icon name="alert" /><div><strong>{workerOffline ? "worker-04 unavailable" : "Redis latency elevated"}</strong><span>{workerOffline ? "18 jobs may require recovery or reassignment." : "Queue operations may be delayed. Automatic monitoring is active."}</span></div><small>{workerOffline ? "CRITICAL" : "WARNING"}</small></div>}
+        {(degraded || loadError) && <div className="alert-banner"><Icon name="alert" /><div><strong>{degraded ? "System Degraded" : "Some data unavailable"}</strong><span>{loadError || "One or more infrastructure services are unhealthy."}</span></div><small>{degraded ? "WARNING" : "ERROR"}</small></div>}
 
-        <div className="live-strip"><span className="live-tag"><i />LIVE</span><strong>System telemetry updating</strong><span>Last reconciliation: 18s ago</span><span className="clock-id">CLOCK <code>sys-{String(tick).padStart(4, "0")}</code></span></div>
+        <div className="live-strip"><span className="live-tag"><i />LIVE</span><strong>Request metrics {metricsStreamConnected ? "streaming" : "reconnecting"}</strong><span>Counts update as API requests complete</span></div>
 
         <div className="metrics">
-          <MetricCard label="QUEUED JOBS" value={queued} detail="— scheduled" icon="queue" />
-          <MetricCard label="ACTIVE JOBS" value={active} detail={`${workers.length} workers registered`} icon="activity" />
-          <MetricCard label="THROUGHPUT" value={`${throughput.toLocaleString()} jobs/min`} detail="— vs previous hour" icon="bolt" />
-          <MetricCard label="SUCCESS RATE" value={`${success.toFixed(2)}%`} detail="—" icon="check" tone="success" />
-          <MetricCard label="FAILED JOBS" value={failed} detail="— awaiting retry" icon="alert" tone="warning" />
-          <MetricCard label="P99 LATENCY" value={`${p99} ms`} detail="—" icon="clock" />
+          <MetricCard label="QUEUED JOBS" value={queued} detail="Current database count" icon="queue" />
+          <MetricCard label="ACTIVE JOBS" value={active} detail={`${activeWorkers} observed worker leases`} icon="activity" />
+          <MetricCard label="API REQUESTS" value={throughput.toLocaleString()} detail="Since API process start" icon="bolt" />
+          <MetricCard label="SUCCESSFUL REQS" value={success} detail="Successful HTTP responses" icon="check" tone="success" />
+          <MetricCard label="FAILED JOBS" value={failed} detail="Current failed job count" icon="alert" tone="warning" />
+          <MetricCard label="AVG API LATENCY" value={`${averageLatency.toFixed(1)} ms`} detail="Since API process start" icon="clock" />
         </div>
 
-        <div className="primary-grid"><ThroughputChart values={chart} range={range} setRange={setRange} /><QueueVisualization queued={queued} active={active} /></div>
+        <div className="primary-grid"><ThroughputChart values={chart} failedValues={failedChart} range={range} setRange={setRange} /><QueueVisualization queued={queued} active={active} failed={failed} /></div>
         <div className="secondary-grid"><WorkerFleet workers={workers} /><RecentJobs jobs={jobs} onSelect={setSelectedJob} /><LiveEvents events={events} /></div>
-        <HealthStrip degraded={degraded} />
-        <footer><span>JobMesh Control Plane</span><span>API v— · PostgreSQL — · Redis Streams</span><span>Region <code>—</code></span></footer>
+        <HealthStrip health={healthData} ready={readyData} workers={activeWorkers} outbox={outboxPending} />
+        <footer><span>JobMesh Control Plane</span><span>PostgreSQL-backed job and outbox data</span><Link to="/system">System operations</Link></footer>
       </div>
     </main>
 
-    {createOpen && <div className="modal-layer" role="dialog" aria-modal="true"><div className="modal card">
-      <div className="modal-head"><div><div className="section-title">Create job</div><div className="section-subtitle">Persist to PostgreSQL and publish via transactional outbox.</div></div><button className="icon-btn" onClick={() => setCreateOpen(false)}><Icon name="x" /></button></div>
-      <label>JOB TYPE<input defaultValue="process_json" /></label><label>PAYLOAD<textarea defaultValue={'{\n  "source": "s3://batch/input-204.json"\n}'} /></label>
-      <div className="form-grid"><label>MAX ATTEMPTS<input defaultValue="3" /></label><label>PRIORITY<select defaultValue="normal"><option>normal</option><option>high</option><option>critical</option></select></label></div>
-      <div className="idempotency"><Icon name="check" /><span><strong>Idempotency enabled</strong>Duplicate submissions will resolve to the same job.</span></div>
-      <div className="modal-actions"><Button onClick={() => setCreateOpen(false)}>Cancel</Button><Button variant="primary" icon="plus" onClick={submitJob}>Create Job</Button></div>
-    </div></div>}
-
     {selectedJob && <div className="drawer-layer" onClick={() => setSelectedJob(null)}><aside className="job-drawer" onClick={e => e.stopPropagation()}>
       <div className="drawer-head"><div><span>JOB DETAILS</span><code>{selectedJob.id}</code></div><button className="icon-btn" onClick={() => setSelectedJob(null)}><Icon name="x" /></button></div>
-      <StatusBadge status={selectedJob.status} /><div className="detail-list">{[["Type", selectedJob.type], ["Worker", selectedJob.worker], ["Attempt", selectedJob.attempt], ["Created", `${selectedJob.age} sec ago`], ["Duration", selectedJob.duration], ["Delivery", "At-least-once"], ["Idempotency key", "idem_8f31c91a"]].map(([k, v]) => <div key={k}><span>{k}</span><code>{v}</code></div>)}</div>
-      <div className="timeline"><strong>Execution timeline</strong><div><i />Persisted to PostgreSQL</div><div><i />Published to Redis Stream</div><div><i />Claimed by {selectedJob.worker}</div><div className={selectedJob.status === "FAILED" ? "failed-step" : ""}><i />{selectedJob.status === "FAILED" ? "Retries exhausted" : "Execution completed"}</div></div>
+      <StatusBadge status={selectedJob.status} /><div className="detail-list">{[["Type", selectedJob.type], ["Worker", selectedJob.worker], ["Attempt", selectedJob.attempt], ["Created", `${selectedJob.age} sec ago`], ["Duration", selectedJob.duration], ["Idempotency key", selectedJob.idempotencyKey]].map(([k, v]) => <div key={k}><span>{k}</span><code>{v}</code></div>)}</div>
+      <div style={{ marginTop: '1rem' }}><Link to={`/jobs/${selectedJob.id}`}><Button variant="primary" onClick={() => setSelectedJob(null)}>View Full Details</Button></Link></div>
     </aside></div>}
   </div>;
 }

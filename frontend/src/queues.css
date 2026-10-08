@@ -172,6 +172,11 @@
 .qs-badge.warning { color: var(--qs-amber); background: var(--qs-amber-bg); border-color: #5b4224; }
 .qs-badge.normal { color: var(--qs-green); background: var(--qs-green-bg); border-color: #21483c; }
 .qs-badge.healthy { color: var(--qs-green); background: var(--qs-green-bg); border-color: #21483c; }
+.qs-badge.muted { color: #91a0b3; background: #222a35; border-color: #394351; }
+.qs-count-bar { height: 7px; width: 100%; background: #222a35; }
+.qs-count-bar span { display: block; height: 100%; background: var(--qs-blue); }
+.qs-event-feed > a { width: 100%; min-height: 48px; padding: 7px 11px; display: grid; grid-template-columns: 76px 1fr; gap: 5px; text-align: left; border-bottom: 1px solid #19212b; text-decoration: none; }
+.qs-event-feed > a:hover { background: #131a24; }
 
 /* Stream panel */
 .qs-stream-content { display: grid; grid-template-columns: 320px 1fr; min-height: 160px; }

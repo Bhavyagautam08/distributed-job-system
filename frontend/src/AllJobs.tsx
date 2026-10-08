@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import "./all-jobs.css";
+import { cancelJob, getJobs, retryJob } from "./api/jobs";
+import type { Job as ApiJob } from "./api/jobs";
 
-type Status = "QUEUED" | "RUNNING" | "SUCCESS" | "RETRYING" | "FAILED";
-type Job = {
+type Status = "QUEUED" | "RUNNING" | "SUCCESS" | "RETRYING" | "FAILED" | "CANCELLED";
+type JobRow = {
   id: string;
   type: "calculate_primes" | "process_json" | "cpu_intensive" | "long_running";
   status: Status;
-  priority: "LOW" | "NORMAL" | "HIGH" | "CRITICAL";
+  priority: string;
   attempt: number;
   maxAttempts: number;
   worker?: string;
@@ -19,9 +21,30 @@ type Job = {
   reason?: string;
 };
 
-const types: Job["type"][] = ["calculate_primes", "process_json", "cpu_intensive", "long_running"];
+const types = ["calculate_primes", "process_json", "cpu_intensive", "long_running"];
 
-const initialJobs: Job[] = [];
+function toJobRow(job: ApiJob): JobRow {
+  const ageSeconds = Math.max(0, Math.floor((Date.now() - new Date(job.created_at).getTime()) / 1000));
+  const priorityLabels = ["LOW", "NORMAL", "HIGH", "CRITICAL"];
+  const duration = job.started_at && job.completed_at
+    ? `${((new Date(job.completed_at).getTime() - new Date(job.started_at).getTime()) / 1000).toFixed(2)} s`
+    : "—";
+  return {
+    id: job.id,
+    type: job.type as JobRow["type"],
+    status: job.status,
+    priority: priorityLabels[job.priority] ?? String(job.priority),
+    attempt: job.attempt_count,
+    maxAttempts: job.max_attempts,
+    worker: job.locked_by ?? undefined,
+    scheduled: job.scheduled_at ? new Date(job.scheduled_at).toLocaleTimeString() : "—",
+    created: new Date(job.created_at).toLocaleString(),
+    duration,
+    updated: ageSeconds < 5 ? "now" : `${ageSeconds}s ago`,
+    key: job.idempotency_key,
+    reason: job.error ?? undefined
+  };
+}
 
 
 const iconPaths: Record<string, React.ReactNode> = {
@@ -65,16 +88,25 @@ function Sidebar() {
       {(items as string[][]).map(([item, icon]) => {
         const isJobs = item === "All Jobs";
         const isCmd = item === "Command Center";
-        const to = isJobs ? "/jobs" : isCmd ? "/" : "#";
+        const destinations: Record<string, string> = {
+          "All Jobs": "/jobs",
+          "Create Job": "/jobs/create",
+          "Retry Queue": "/jobs?status=QUEUED",
+          "Failed Jobs": "/jobs?status=FAILED",
+          "Workers": "/workers",
+          "Queue": "/queues",
+          "Events": "/queues",
+          "Metrics": "/system",
+          "System Health": "/system",
+          "Settings": "/system"
+        };
+        const to = isCmd ? "/" : destinations[item] ?? "/jobs";
         return <Link to={to} className={`nav-item ${isJobs ? "active" : ""}`} key={item}><Icon name={icon}/><span>{item}</span></Link>;
       })}
     </div>)}</nav>
     <div className="system-card">
       <div className="operational"><span className="health-dot"/>SYSTEMS STATUS</div>
-      <div className="health-row"><span>API</span><strong>—</strong></div>
-      <div className="health-row"><span>Postgres</span><strong>—</strong></div>
-      <div className="health-row"><span>Redis</span><strong>—</strong></div>
-      <div className="health-row"><span>Workers</span><strong>—</strong></div>
+      <Link to="/system" className="health-row"><span>Service health</span><strong>View</strong></Link>
     </div>
   </aside>;
 }
@@ -84,7 +116,7 @@ function Topbar({ lastSync }: { lastSync: string }) {
     <div className="mobile-brand">JM</div>
     <div className="breadcrumb"><span>Jobs</span><Icon name="chevron" size={13}/><b>All Jobs</b></div>
     <div className="global-search"><Icon name="search"/><span>Search jobs, IDs, idempotency keys...</span><kbd>⌘ K</kbd></div>
-    <div className="top-meta"><span className="environment">PRODUCTION</span>{lastSync && <span className="synced"><i/>{lastSync}</span>}<button className="icon-btn" aria-label="Notifications"><Icon name="bell"/></button><div className="avatar">JM</div></div>
+    <div className="top-meta"><span className="environment">CONTROL PLANE</span>{lastSync && <span className="synced"><i/>{lastSync}</span>}<Link className="icon-btn" aria-label="View queue events" to="/queues"><Icon name="bell"/></Link><Link className="avatar" aria-label="Command Center" to="/">JM</Link></div>
   </header>;
 }
 
@@ -100,33 +132,64 @@ function FilterDropdown({ label, value, options, onChange }: { label: string; va
   </div>;
 }
 
-function JobId({ job, copy }: { job: Job; copy: (value: string) => void }) {
+function JobId({ job, copy }: { job: JobRow; copy: (value: string) => void }) {
   return <div className="job-id"><button className="id-link" title={job.id}>{job.id.slice(0, 8)}...{job.id.slice(-3)}</button><button className="copy" title="Copy job ID" onClick={(e) => { e.stopPropagation(); copy(job.id); }}><Icon name="copy" size={13}/></button><span className="idempotent" title="This job was created with an Idempotency-Key. Duplicate requests resolve to the same logical job."><Icon name="check" size={10}/></span></div>;
 }
 
 function Pagination({ count }: { count: number }) {
   return <div className="pagination">
-    <div>Showing <b>1–{Math.min(30, count)}</b> of <b>{count}</b> jobs <span className="server-note">· Server-side results</span></div>
-    <div className="page-controls"><button disabled>Previous</button><button className="current">1</button><button disabled>Next</button></div>
-    <div className="page-size">Page 1 of 1 <select defaultValue="50"><option>50 / page</option><option>100 / page</option><option>250 / page</option></select></div>
+    <div>Showing <b>{count}</b> loaded job{count === 1 ? "" : "s"} <span className="server-note">· Refresh for the latest records</span></div>
   </div>;
 }
 
 function AllJobs() {
   const navigate = useNavigate();
-  const [jobs, setJobs] = useState(initialJobs);
-  const [status, setStatus] = useState("ALL");
+  const [searchParams] = useSearchParams();
+  const [jobs, setJobs] = useState<JobRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [actionBusy, setActionBusy] = useState(false);
+  const [total, setTotal] = useState(0);
+  const [statusCounts, setStatusCounts] = useState<Record<string, number>>({});
+  const [status, setStatus] = useState(searchParams.get("status") ?? "ALL");
   const [type, setType] = useState("");
   const [worker, setWorker] = useState("");
   const [priority, setPriority] = useState("");
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(searchParams.get("search") ?? "");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState("");
   const [menu, setMenu] = useState<string | null>(null);
   const [confirm, setConfirm] = useState(false);
-  const [create, setCreate] = useState(false);
   const [lastSync, setLastSync] = useState("");
   const [sort, setSort] = useState<"default" | "asc" | "desc">("desc");
+
+  const fetchJobs = async () => {
+    try {
+      if (!jobs.length) setLoading(true);
+      const res = await getJobs({ limit: 250 });
+      setJobs(res.jobs.map(toJobRow));
+      setTotal(res.total);
+      setStatusCounts(res.statusCounts);
+      setLoadError("");
+      setLastSync('Synced just now');
+    } catch (requestError) {
+      setLoadError(requestError instanceof Error ? requestError.message : "Unable to load jobs");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void fetchJobs();
+    const int = setInterval(() => void fetchJobs(), 10000);
+    return () => clearInterval(int);
+  }, []);
+
+  useEffect(() => {
+    const requestedStatus = searchParams.get("status");
+    setStatus(requestedStatus ?? "ALL");
+    setSearch(searchParams.get("search") ?? "");
+  }, [searchParams]);
 
   // Derive unique workers from actual job data
   const workerOptions = useMemo(() => [...new Set(jobs.map(j => j.worker).filter(Boolean))] as string[], [jobs]);
@@ -149,14 +212,36 @@ function AllJobs() {
   const clear = () => { setStatus("ALL"); setType(""); setWorker(""); setPriority(""); setSearch(""); };
   const copy = (value: string) => { navigator.clipboard?.writeText(value); setToast("Job ID copied"); };
   const toggle = (id: string) => setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  const retrySelected = () => {
-    setJobs(current => current.map(j => selected.has(j.id) && j.status === "FAILED" ? { ...j, status: "RETRYING", scheduled: "in 3.8s", updated: "now", reason: undefined } : j));
-    setSelected(new Set()); setConfirm(false); setToast("Retry scheduled with exponential backoff + jitter");
+  const retrySelected = async () => {
+    const ids = [...selected].filter((id) => jobs.some((job) => job.id === id && job.status === "FAILED"));
+    if (!ids.length) return;
+    setActionBusy(true);
+    try {
+      await Promise.all(ids.map(retryJob));
+      setSelected(new Set());
+      setConfirm(false);
+      setToast(`${ids.length} retry request${ids.length === 1 ? "" : "s"} accepted`);
+      await fetchJobs();
+    } catch (actionError) {
+      setLoadError(actionError instanceof Error ? actionError.message : "Unable to retry selected jobs");
+    } finally {
+      setActionBusy(false);
+    }
   };
-  const createJob = (e: React.FormEvent) => {
-    e.preventDefault();
-    const job: Job = { id: "new-" + Math.random().toString(36).slice(2, 9), key: "custom-key-" + Date.now(), type: "calculate_primes", status: "QUEUED", priority: "NORMAL", attempt: 0, maxAttempts: 3, created: "now", updated: "now", scheduled: "in 1.2s", duration: "—" };
-    setJobs(j => [job, ...j]); setCreate(false); setToast("Job created · Job ID: " + job.id);
+  const cancelSelected = async () => {
+    const ids = [...selected].filter((id) => jobs.some((job) => job.id === id && job.status === "QUEUED"));
+    if (!ids.length) return;
+    setActionBusy(true);
+    try {
+      await Promise.all(ids.map(cancelJob));
+      setSelected(new Set());
+      setToast(`${ids.length} queued job${ids.length === 1 ? "" : "s"} cancelled`);
+      await fetchJobs();
+    } catch (actionError) {
+      setLoadError(actionError instanceof Error ? actionError.message : "Unable to cancel selected jobs");
+    } finally {
+      setActionBusy(false);
+    }
   };
 
   const activeWorkers = jobs.filter(j => j.status === 'RUNNING').length;
@@ -166,32 +251,34 @@ function AllJobs() {
     <main className="content">
       <div className="page-header">
         <div><div className="eyebrow"><span className="live-dot"/>LIVE {activeWorkers > 0 && <span>{activeWorkers} job{activeWorkers !== 1 ? 's' : ''} running</span>}</div><h1>Jobs</h1><p>Inspect, filter and manage distributed job execution.</p></div>
-        <div className="header-actions"><button className="secondary" onClick={() => { setLastSync('Synced just now'); setToast("Jobs refreshed · Synced now"); }}><Icon name="refresh"/>Refresh</button><button className="primary" onClick={() => setCreate(true)}><Icon name="plus"/>Create Job</button></div>
+        <div className="header-actions"><button className="secondary" onClick={() => void fetchJobs()} disabled={loading}><Icon name="refresh"/>Refresh</button><button className="primary" onClick={() => navigate("/jobs/create")}><Icon name="plus"/>Create Job</button></div>
       </div>
+      {loadError && <div className="panel" role="alert" style={{ padding: "1rem", marginBottom: "1rem", color: "var(--red)" }}>{loadError}</div>}
+      {loading && !jobs.length && <div className="empty">Loading jobs…</div>}
       <div className="summary-line">
-        <span><b>{jobs.length}</b> total jobs</span>
-        <span><i className="q"/>{jobs.filter(j => j.status === 'QUEUED').length} queued</span>
-        <span><i className="r"/>{jobs.filter(j => j.status === 'RUNNING').length} running</span>
-        <span><i className="f"/>{jobs.filter(j => j.status === 'FAILED').length} failed</span>
-        <span><i className="s"/>{jobs.filter(j => j.status === 'SUCCESS').length} completed</span>
+        <span><b>{total}</b> total jobs</span>
+        <span><i className="q"/>{statusCounts.QUEUED ?? 0} queued</span>
+        <span><i className="r"/>{statusCounts.RUNNING ?? 0} running</span>
+        <span><i className="f"/>{statusCounts.FAILED ?? 0} failed</span>
+        <span><i className="s"/>{statusCounts.SUCCESS ?? 0} completed</span>
       </div>
 
       <section className="status-summary">
         {[
-          ["ALL", jobs.length],
-          ["QUEUED", jobs.filter(j => j.status === 'QUEUED').length],
-          ["RUNNING", jobs.filter(j => j.status === 'RUNNING').length],
-          ["SUCCESS", jobs.filter(j => j.status === 'SUCCESS').length],
-          ["FAILED", jobs.filter(j => j.status === 'FAILED').length]
+          ["ALL", total],
+          ["QUEUED", statusCounts.QUEUED ?? 0],
+          ["RUNNING", statusCounts.RUNNING ?? 0],
+          ["SUCCESS", statusCounts.SUCCESS ?? 0],
+          ["FAILED", statusCounts.FAILED ?? 0]
         ].map(([name, count]) => <button key={name as string} onClick={() => setStatus(name as string)} className={status === name ? "selected" : ""}><span>{name as string}</span><b>{count as number}</b></button>)}
       </section>
 
       <section className="table-shell">
-        {selected.size ? <div className="bulk-bar"><div><b>{selected.size} jobs selected</b><span>{[...selected].filter(id => jobs.find(j => j.id === id)?.status === "FAILED").length} failed · {[...selected].filter(id => jobs.find(j => j.id === id)?.status === "QUEUED").length} queued</span></div><div><button onClick={() => setConfirm(true)}><Icon name="refresh"/>Retry</button><button><span>×</span>Cancel</button><button>Export</button><button className="clear-selection" onClick={() => setSelected(new Set())}>Clear selection</button></div></div> :
+        {selected.size ? <div className="bulk-bar"><div><b>{selected.size} jobs selected</b><span>{[...selected].filter(id => jobs.find(j => j.id === id)?.status === "FAILED").length} failed · {[...selected].filter(id => jobs.find(j => j.id === id)?.status === "QUEUED").length} queued</span></div><div><button disabled={actionBusy} onClick={() => setConfirm(true)}><Icon name="refresh"/>Retry failed</button><button disabled={actionBusy} onClick={() => void cancelSelected()}><span>×</span>Cancel queued</button><button className="clear-selection" onClick={() => setSelected(new Set())}>Clear selection</button></div></div> :
         <div className="filters">
           <label className="search-field"><Icon name="search"/><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by Job ID, type, idempotency key..."/><kbd>/</kbd></label>
           <div className="filter-list">
-            <FilterDropdown label="Status" value={status === "ALL" ? "" : status} options={["ALL","QUEUED","RUNNING","SUCCESS","FAILED"]} onChange={setStatus}/>
+            <FilterDropdown label="Status" value={status === "ALL" ? "" : status} options={["ALL","QUEUED","RUNNING","SUCCESS","FAILED","CANCELLED"]} onChange={setStatus}/>
             <FilterDropdown label="Type" value={type} options={types} onChange={setType}/>
             <FilterDropdown label="Worker" value={worker} options={workerOptions.length ? workerOptions : []} onChange={setWorker}/>
             <FilterDropdown label="Priority" value={priority} options={["LOW","NORMAL","HIGH","CRITICAL"]} onChange={setPriority}/>
@@ -221,21 +308,20 @@ function AllJobs() {
               <td><span className={job.scheduled !== "—" ? "scheduled" : "muted"}>{job.scheduled !== "—" && <Icon name="clock" size={13}/>} {job.scheduled}</span></td>
               <td className="mono">{job.created}</td><td className="mono">{job.duration}</td><td className="mono">{job.updated}</td>
               <td className="row-end"><Icon name="arrow" size={15}/><button onClick={(e) => {e.stopPropagation(); setMenu(menu === job.id ? null : job.id);}}><Icon name="more"/></button>
-                {menu === job.id && <div className="action-menu" onClick={e => e.stopPropagation()}><button onClick={() => navigate(`/jobs/${job.id}`)}>View details</button>{job.status === "RUNNING" && <button>View worker</button>}{job.status === "FAILED" && <button className="retry" onClick={() => { setSelected(new Set([job.id])); setConfirm(true); setMenu(null); }}>Retry job</button>}{job.status === "QUEUED" && <button>Cancel job</button>}<button onClick={() => { navigator.clipboard?.writeText(job.id); setToast('Job ID copied'); setMenu(null); }}>Copy job ID</button></div>}
+                {menu === job.id && <div className="action-menu" onClick={e => e.stopPropagation()}><button onClick={() => navigate(`/jobs/${job.id}`)}>View details</button>{job.worker && <button onClick={() => navigate(`/workers?worker=${encodeURIComponent(job.worker!)}`)}>View worker</button>}{job.status === "FAILED" && <button className="retry" onClick={() => { setSelected(new Set([job.id])); setConfirm(true); setMenu(null); }}>Retry job</button>}{job.status === "QUEUED" && <button onClick={async () => { try { await cancelJob(job.id); await fetchJobs(); setToast("Queued job cancelled"); } catch (actionError) { setLoadError(actionError instanceof Error ? actionError.message : "Unable to cancel job"); } setMenu(null); }}>Cancel job</button>}<button onClick={() => { navigator.clipboard?.writeText(job.id); setToast('Job ID copied'); setMenu(null); }}>Copy job ID</button></div>}
               </td>
             </tr>)}</tbody>
           </table>
           {!filtered.length && <div className="empty"><div className="empty-icon"><Icon name="search" size={22}/></div><b>No jobs match your filters.</b><span>Try adjusting your search or clearing active filters.</span><button className="secondary" onClick={clear}>Clear filters</button></div>}
         </div>
-        <div className="mobile-jobs">{filtered.map(job => <button className="job-card" key={job.id} onClick={() => setDetails(job)}><div><StatusBadge status={job.status}/><Icon name="chevron"/></div><JobId job={job} copy={copy}/><strong>{job.type}</strong><div className="card-meta"><span>Attempt {job.attempt || "—"} / 3</span><span>{job.worker || "Unassigned"}</span><span>{job.updated}</span></div></button>)}</div>
+        <div className="mobile-jobs">{filtered.map(job => <button className="job-card" key={job.id} onClick={() => navigate(`/jobs/${job.id}`)}><div><StatusBadge status={job.status}/><Icon name="chevron"/></div><JobId job={job} copy={copy}/><strong>{job.type}</strong><div className="card-meta"><span>Attempt {job.attempt || "—"} / {job.maxAttempts}</span><span>{job.worker || "Unassigned"}</span><span>{job.updated}</span></div></button>)}</div>
         <Pagination count={filtered.length}/>
       </section>
-      <div className="architecture-note"><span>PostgreSQL <b>SOURCE OF TRUTH</b></span><i/><span>Redis Streams <b>QUEUE / COORDINATION</b></span><i/><span>Workers <b>EXECUTION</b></span><i/><span>Delivery <b>AT-LEAST-ONCE</b></span></div>
+      <div className="architecture-note"><span>PostgreSQL <b>SOURCE OF TRUTH</b></span><i/><span>Redis Streams <b>QUEUE / COORDINATION</b></span><i/><span>Worker and queue views are linked in the sidebar</span></div>
     </main></div>
 
     {toast && <div className="toast"><span className="toast-icon"><Icon name="check"/></span><div><b>{toast.split(" · ")[0]}</b>{toast.includes(" · ") && <span>{toast.split(" · ")[1]}</span>}</div></div>}
-    {confirm && <div className="overlay center"><div className="modal"><div className="modal-icon"><Icon name="refresh"/></div><h2>Retry selected jobs?</h2><p>Failed jobs will be scheduled using exponential backoff with jitter. Attempt counts are preserved.</p><div className="modal-actions"><button className="secondary" onClick={() => setConfirm(false)}>Cancel</button><button className="primary" onClick={retrySelected}>Retry jobs</button></div></div></div>}
-    {create && <div className="overlay center"><form className="modal create-modal" onSubmit={createJob}><div className="form-heading"><div><span>CREATE JOB</span><h2>Submit a distributed job</h2></div><button type="button" onClick={() => setCreate(false)}>×</button></div><label>Job type<select defaultValue="calculate_primes"><option>calculate_primes</option><option>process_json</option><option>cpu_intensive</option><option>long_running</option></select></label><label>Payload<textarea defaultValue={'{\n  "limit": 100000\n}'}/></label><label>Idempotency-Key <small>Required</small><input defaultValue="prime-test-001" required/></label><div className="idempotency-help"><Icon name="info"/>Submitting this key again returns the existing logical job instead of creating a duplicate.</div><div className="modal-actions"><button type="button" className="secondary" onClick={() => setCreate(false)}>Cancel</button><button className="primary" type="submit">Create Job</button></div></form></div>}
+    {confirm && <div className="overlay center"><div className="modal"><div className="modal-icon"><Icon name="refresh"/></div><h2>Retry selected jobs?</h2><p>Failed jobs will be scheduled through the backend. The retry limit is extended by one attempt for each manual retry.</p><div className="modal-actions"><button className="secondary" onClick={() => setConfirm(false)}>Cancel</button><button className="primary" disabled={actionBusy} onClick={() => void retrySelected()}>{actionBusy ? "Submitting…" : "Retry jobs"}</button></div></div></div>}
   </div>;
 }
 

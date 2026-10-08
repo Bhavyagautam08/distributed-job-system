@@ -1,0 +1,151 @@
+{
+  "runId": "20261008232142910-7fcee219",
+  "size": 200,
+  "jobsPerType": {
+    "calculate_primes": 50,
+    "process_json": 50,
+    "cpu_intensive": 50,
+    "long_running": 50
+  },
+  "requestRatePerSecond": 1,
+  "minimumEstimatedUpstashCommands": 200,
+  "payloadProfiles": {
+    "calculate_primes": [
+      400,
+      600,
+      800
+    ],
+    "process_json_batch_items": [
+      16,
+      64,
+      128
+    ],
+    "cpu_intensive_iterations": [
+      250000,
+      500000,
+      1000000
+    ],
+    "long_running_duration_ms": [
+      100,
+      250,
+      500
+    ]
+  },
+  "baseUrl": "http://localhost:5000",
+  "scope": "API job creation and PostgreSQL persistence; worker execution is not measured",
+  "startedAt": "2026-10-08T23:21:44.465Z",
+  "completedAt": "2026-10-08T23:25:07.470Z",
+  "databaseBefore": {
+    "existing_jobs": 199,
+    "unpublished_outbox_events": 199
+  },
+  "autocannon": {
+    "attempts": [
+      {
+        "attemptedJobs": 200,
+        "requests": {
+          "average": 1,
+          "mean": 1,
+          "stddev": 0.15,
+          "min": 1,
+          "max": 2,
+          "total": 200,
+          "p0_001": 0,
+          "p0_01": 0,
+          "p0_1": 0,
+          "p1": 0,
+          "p2_5": 1,
+          "p10": 1,
+          "p25": 1,
+          "p50": 1,
+          "p75": 1,
+          "p90": 1,
+          "p97_5": 1,
+          "p99": 1,
+          "p99_9": 2,
+          "p99_99": 2,
+          "p99_999": 2,
+          "sent": 200
+        },
+        "throughput": {
+          "average": 1482.42,
+          "mean": 1482.42,
+          "stddev": 1451.35,
+          "min": 826,
+          "max": 6608,
+          "total": 296461,
+          "p0_001": 0,
+          "p0_01": 0,
+          "p0_1": 0,
+          "p1": 0,
+          "p2_5": 826,
+          "p10": 826,
+          "p25": 826,
+          "p50": 828,
+          "p75": 1430,
+          "p90": 3293,
+          "p97_5": 5787,
+          "p99": 5791,
+          "p99_9": 6611,
+          "p99_99": 6611,
+          "p99_999": 6611
+        },
+        "latency": {
+          "average": 226.35,
+          "mean": 226.35,
+          "stddev": 211.76,
+          "min": 1,
+          "max": 1693,
+          "p0_001": 1,
+          "p0_01": 1,
+          "p0_1": 1,
+          "p1": 4,
+          "p2_5": 10,
+          "p10": 39,
+          "p25": 97,
+          "p50": 194,
+          "p75": 291,
+          "p90": 352,
+          "p97_5": 874,
+          "p99": 1261,
+          "p99_9": 1616,
+          "p99_99": 1686,
+          "p99_999": 1693,
+          "totalCount": 77464
+        },
+        "statusCodeStats": {
+          "201": {
+            "count": 200
+          }
+        },
+        "non2xx": 0,
+        "errors": 0,
+        "timeouts": 0
+      }
+    ],
+    "requestsSent": 200,
+    "non2xx": 0
+  },
+  "persisted": {
+    "total": 200,
+    "byType": {
+      "calculate_primes": {
+        "count": 50,
+        "distinctKeys": 50
+      },
+      "cpu_intensive": {
+        "count": 50,
+        "distinctKeys": 50
+      },
+      "long_running": {
+        "count": 50,
+        "distinctKeys": 50
+      },
+      "process_json": {
+        "count": 50,
+        "distinctKeys": 50
+      }
+    }
+  },
+  "passed": true
+}

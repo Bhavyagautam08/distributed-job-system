@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import "./job-detail.css";
 
 type IconName =
@@ -35,10 +35,10 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
 const navItems: { name: string; icon: IconName; to: string }[] = [
   { name: "Command Center", icon: "grid", to: "/" },
   { name: "Jobs", icon: "jobs", to: "/jobs" },
-  { name: "Workers", icon: "workers", to: "#" },
-  { name: "Queues", icon: "queue", to: "#" },
-  { name: "Metrics", icon: "metrics", to: "#" },
-  { name: "System", icon: "system", to: "#" },
+  { name: "Workers", icon: "workers", to: "/workers" },
+  { name: "Queues", icon: "queue", to: "/queues" },
+  { name: "Metrics", icon: "metrics", to: "/system" },
+  { name: "System", icon: "system", to: "/system" },
 ];
 
 function SectionHeader({ title, meta, actions }: { title: string; meta?: string; actions?: React.ReactNode }) {
@@ -55,25 +55,93 @@ function CopyButton({ value, label }: { value: string; label?: string }) {
   return <button className="copy-button" onClick={copy} disabled={!value}><Icon name={copied ? "check" : "copy"} size={13} /><span>{copied ? "Copied" : label ?? value}</span></button>;
 }
 
+import { cancelJob, getJob, retryJob } from "./api/jobs";
+import type { Job, JobAttempt, JobEvent } from "./api/jobs";
+
 export default function JobDetail() {
+  const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
-  const [attempt, setAttempt] = useState<number | null>(null);
-  const [modal, setModal] = useState<"retry" | "replay" | "cancel" | null>(null);
-  const [filter, setFilter] = useState("ALL");
-  const [jsonExpanded, setJsonExpanded] = useState(true);
+  const [quickSearch, setQuickSearch] = useState("");
+  const [job, setJob] = useState<Job | null>(null);
+  const [attempts, setAttempts] = useState<JobAttempt[]>([]);
+  const [events, setEvents] = useState<JobEvent[]>([]);
   const [duplicateOpen, setDuplicateOpen] = useState(false);
   const [toast, setToast] = useState("");
-  const notify = (message: string) => {
-    setToast(message);
-    window.setTimeout(() => setToast(""), 1800);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [actionBusy, setActionBusy] = useState(false);
+  const [pollVersion, setPollVersion] = useState(0);
+  const fetchJobDetails = async () => {
+    if (!id) return;
+    try {
+      const res = await getJob(id);
+      setJob(res.job);
+      setAttempts(res.attempts);
+      setEvents(res.events);
+      setError("");
+      return res.job.status === "SUCCESS" || res.job.status === "FAILED" || res.job.status === "CANCELLED";
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Unable to load this job");
+      return true;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let timer: number | undefined;
+    let cancelled = false;
+    const poll = async () => {
+      const done = await fetchJobDetails();
+      if (!cancelled && !done) timer = window.setTimeout(() => void poll(), 3000);
+    };
+    setLoading(true);
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [id, pollVersion]);
+
+  const performJobAction = async (action: "retry" | "cancel") => {
+    if (!job) return;
+    setActionBusy(true);
+    try {
+      const response = action === "retry" ? await retryJob(job.id) : await cancelJob(job.id);
+      setJob(response.job);
+      setToast(action === "retry" ? "Retry scheduled" : "Queued job cancelled");
+      setError("");
+      setPollVersion((version) => version + 1);
+      await fetchJobDetails();
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : `Unable to ${action} job`);
+    } finally {
+      setActionBusy(false);
+    }
   };
 
   // Display ID — truncated for header, full for copy
-  const displayId = id ? `${id.slice(0, 8).toUpperCase()}` : "—";
-  const shortId = id ? `${id.slice(0, 8)}...${id.slice(-4)}` : "—";
+  const formatDate = (iso?: string | null) => iso ? new Date(iso).toLocaleString() : "—";
+  const duration = job?.started_at && job.completed_at
+    ? `${((new Date(job.completed_at).getTime() - new Date(job.started_at).getTime()) / 1000).toFixed(2)}s`
+    : "—";
 
-  // All data fields are empty — will be populated from backend API
-  const summary: [string, string][] = [
+  const summary: [string, string][] = job ? [
+    ["Job ID", job.id],
+    ["Job Type", job.type],
+    ["Status", job.status],
+    ["Priority", String(job.priority)],
+    ["Idempotency Key", job.idempotency_key || "—"],
+    ["Attempt Count", `${job.attempt_count} / ${job.max_attempts}`],
+    ["Current Worker", job.locked_by || "—"],
+    ["Created At", formatDate(job.created_at)],
+    ["Scheduled At", formatDate(job.scheduled_at)],
+    ["Started At", formatDate(job.started_at)],
+    ["Completed At", formatDate(job.completed_at)],
+    ["Updated At", formatDate(job.updated_at)],
+    ["Duration", duration],
+    ["Version", String(job.version)]
+  ] : [
     ["Job ID", id ?? "—"],
     ["Job Type", "—"],
     ["Status", "—"],
@@ -82,20 +150,43 @@ export default function JobDetail() {
     ["Attempt Count", "—"],
     ["Current Worker", "—"],
     ["Created At", "—"],
+    ["Scheduled At", "—"],
     ["Started At", "—"],
     ["Completed At", "—"],
+    ["Updated At", "—"],
     ["Duration", "—"],
-    ["Scheduled At", "—"],
-    ["Version", "—"],
+    ["Version", "—"]
   ];
 
-  // Empty timeline — will be populated from backend
   const timeline: { label: string; time: string; meta: string; state: string }[] = [];
+  if (job) {
+    timeline.push({ label: "Created", time: formatDate(job.created_at), meta: "Persisted to PostgreSQL", state: "success" });
+    if (job.scheduled_at) timeline.push({ label: "Queued", time: formatDate(job.scheduled_at), meta: "Eligible for execution", state: "success" });
+    for (const attemptRecord of attempts) {
+      timeline.push({
+        label: `Attempt ${attemptRecord.attempt_number}`,
+        time: formatDate(attemptRecord.started_at),
+        meta: attemptRecord.status,
+        state: attemptRecord.status === "FAILED" ? "failed" : attemptRecord.status === "RUNNING" ? "active" : "success"
+      });
+      if (attemptRecord.completed_at) {
+        timeline.push({
+          label: attemptRecord.status === "SUCCESS" ? "Success" : "Failed",
+          time: formatDate(attemptRecord.completed_at),
+          meta: attemptRecord.error || attemptRecord.status,
+          state: attemptRecord.status === "FAILED" ? "failed" : "success"
+        });
+      }
+    }
+    if (job.status === "CANCELLED" && job.completed_at) {
+      timeline.push({ label: "Cancelled", time: formatDate(job.completed_at), meta: "Cancelled while queued", state: "failed" });
+    }
+  }
+
   const [timelineSelected, setTimelineSelected] = useState(0);
 
-  // Empty logs — will be populated from backend
-  const logs: string[][] = [];
-  const filteredLogs = logs.filter((row) => filter === "ALL" || row[2] === filter);
+  const payloadText = job ? JSON.stringify(job.payload, null, 2) : "";
+  const resultText = job?.result == null ? "" : JSON.stringify(job.result, null, 2);
 
   return <div className="jd-shell">
     <aside className="jd-sidebar">
@@ -114,42 +205,39 @@ export default function JobDetail() {
 
     <div className="workspace">
       <header className="topbar">
-        <div className="environment"><span className="status-dot" />PRODUCTION <span className="region">—</span></div>
+        <div className="environment"><span className="status-dot" />CONTROL PLANE</div>
         <div className="top-actions">
-          <label className="search"><Icon name="search" size={15} /><input placeholder="Search jobs, workers, events..." /></label>
-          <button className="icon-button notification"><Icon name="bell" /><span /></button>
-          <button className="profile"><span>JM</span><div><strong>JobMesh</strong><small>Platform</small></div><Icon name="chevron" size={12} /></button>
+          <form className="search" onSubmit={(event) => { event.preventDefault(); navigate(`/jobs?search=${encodeURIComponent(quickSearch)}`); }}>
+            <Icon name="search" size={15} /><input value={quickSearch} onChange={(event) => setQuickSearch(event.target.value)} placeholder="Search jobs, IDs, idempotency keys..." />
+          </form>
+          <Link className="icon-button notification" aria-label="View queue events" to="/queues"><Icon name="bell" /><span /></Link>
+          <Link className="profile" to="/"><span>JM</span><div><strong>JobMesh</strong><small>Command Center</small></div><Icon name="chevron" size={12} /></Link>
         </div>
       </header>
 
       <main>
         <div className="breadcrumb">
-          <Link to="/jobs">Jobs</Link><Icon name="chevron" size={12} />
-          <Link to="/jobs">Job Details</Link><Icon name="chevron" size={12} />
-          <span>{displayId || "—"}</span>
+          <Link to="/queues">Queue</Link><Icon name="chevron" size={12} />
+          <span>Job Details</span>
         </div>
+        {error && <div className="panel" role="alert" style={{ padding: "1rem", marginBottom: "1rem", color: "var(--red)" }}>{error}</div>}
         <div className="page-header">
           <div className="page-heading">
             <div className="eyebrow">JOB DETAILS / EXECUTION TRACE</div>
             <div className="title-row">
-              <h1>Job <span>{displayId}</span></h1>
-              <span className="badge pending"><span className="status-dot" />—</span>
+              <h1>Job Details</h1>
+              {job && <span className={`badge ${job.status.toLowerCase()}`}><span className="status-dot" />{job.status}</span>}
             </div>
-            <div className="subtitle"><code>—</code><span>—</span><span>—</span></div>
+            <div className="subtitle"><code>{id ?? "—"}</code><CopyButton value={id ?? ""} label="Copy Job ID" /></div>
           </div>
           <div className="header-controls">
-            <div className="copy-group">
-              <CopyButton value={id ?? ""} label="Copy Job ID" />
-              <CopyButton value="" label="Copy Idempotency Key" />
-            </div>
             <div className="action-group">
-              <button className="button" onClick={() => setModal("retry")}><Icon name="retry" />Retry Job</button>
-              <button className="button" onClick={() => setModal("replay")}><Icon name="replay" />Replay Event</button>
-              <button className="button danger" onClick={() => setModal("cancel")}><Icon name="cancel" />Cancel Job</button>
-              <button className="button icon-only"><Icon name="more" /></button>
+              {job?.status === "FAILED" && <button className="button" disabled={actionBusy} onClick={() => void performJobAction("retry")}><Icon name="retry" />Retry Job</button>}
+              {job?.status === "QUEUED" && <button className="button danger" disabled={actionBusy} onClick={() => void performJobAction("cancel")}><Icon name="cancel" />Cancel Job</button>}
             </div>
           </div>
         </div>
+        {loading && !job && <div className="panel" role="status" style={{ padding: "1.5rem" }}>Loading job details…</div>}
 
         <div className="page-grid">
           <div className="primary-column">
@@ -172,7 +260,7 @@ export default function JobDetail() {
                 ? <div className="empty-timeline">No execution events yet — awaiting job data.</div>
                 : <>
                   <div className="timeline-scroll"><div className="timeline">
-                    {timeline.map((stage, i) => <button className={`timeline-node ${stage.state} ${timelineSelected === i ? "selected" : ""}`} key={stage.label} onClick={() => setTimelineSelected(i)}>
+                    {timeline.map((stage, i) => <button className={`timeline-node ${stage.state} ${timelineSelected === i ? "selected" : ""}`} key={`${stage.label}-${i}`} onClick={() => setTimelineSelected(i)}>
                       <span className="node-index">{stage.state === "success" ? <Icon name="check" size={11} /> : i + 1}</span>
                       <span className="node-label">{stage.label}</span><span className="node-time">{stage.time}</span><span className="node-meta">{stage.meta}</span>
                     </button>)}
@@ -187,104 +275,93 @@ export default function JobDetail() {
                 </>}
             </section>
 
-            {/* Execution Attempts */}
             <section className="panel">
-              <SectionHeader title="Execution Attempts" meta="—" />
+              <SectionHeader title="Execution Attempts" meta={`${attempts.length} recorded attempt${attempts.length === 1 ? "" : "s"}`} />
               <div className="table-wrap"><table>
                 <thead><tr><th>ATTEMPT</th><th>WORKER</th><th>STARTED</th><th>COMPLETED</th><th>DURATION</th><th>STATUS</th><th>ERROR</th><th></th></tr></thead>
                 <tbody>
-                  {attempt === null && <tr><td colSpan={8} className="empty-row">No attempt records — awaiting job data.</td></tr>}
+                  {attempts.length === 0 && <tr><td colSpan={8} className="empty-row">{loading ? "Loading attempts…" : "No execution attempts recorded."}</td></tr>}
+                  {attempts.map((record) => {
+                    const elapsed = record.completed_at
+                      ? `${((new Date(record.completed_at).getTime() - new Date(record.started_at).getTime()) / 1000).toFixed(2)}s`
+                      : "—";
+                    const worker = job?.status === "RUNNING" && record.attempt_number === job.attempt_count ? job.locked_by || "—" : "—";
+                    return <tr key={record.id}>
+                      <td>{record.attempt_number}</td><td>{worker}</td><td>{formatDate(record.started_at)}</td>
+                      <td>{formatDate(record.completed_at)}</td><td>{elapsed}</td><td>{record.status}</td><td colSpan={2}>{record.error || "—"}</td>
+                    </tr>;
+                  })}
                 </tbody>
               </table></div>
             </section>
 
-            {/* Result & Failure History */}
             <div className="split-grid result-error">
               <section className="panel">
-                <SectionHeader title="Result" meta="—" actions={<div className="compact-actions">
-                  <CopyButton value="" label="Copy JSON" />
-                  <button onClick={() => setJsonExpanded(true)}><Icon name="expand" size={13} />Expand</button>
-                  <button onClick={() => setJsonExpanded(false)}><Icon name="collapse" size={13} />Collapse</button>
-                  <button><Icon name="download" size={13} /></button>
+                <SectionHeader title="Payload" meta="Submitted JSON" actions={<div className="compact-actions">
+                  <CopyButton value={payloadText} label="Copy JSON" />
                 </div>} />
-                <pre className="json-view"><code>{jsonExpanded ? <span className="muted-placeholder">No result yet</span> : <><span>{"{"}</span> <b>—</b> <span>{"}"}</span></>}</code></pre>
+                <pre className="json-view"><code>{job ? payloadText : loading ? "Loading payload…" : "Payload unavailable."}</code></pre>
               </section>
-              <section className="panel failure-panel">
-                <SectionHeader title="Failure History" meta="—" actions={<span className="badge pending">PENDING</span>} />
-                <div className="failure-message muted-placeholder">No failures recorded.</div>
-                <div className="decision-grid">
-                  <div><span>RETRY DECISION</span><strong>—</strong></div>
-                  <div><span>BACKOFF</span><strong>—</strong></div>
-                  <div><span>NEXT EXECUTION</span><strong>—</strong></div>
-                </div>
+              <section className="panel">
+                <SectionHeader title="Result" meta={job?.status === "SUCCESS" ? "Execution output" : "Available after successful execution"} actions={<div className="compact-actions">
+                  <CopyButton value={resultText} label="Copy JSON" />
+                </div>} />
+                <pre className="json-view"><code>{resultText || (job?.status === "SUCCESS" ? "No result was returned." : "Result not available yet.")}</code></pre>
               </section>
             </div>
+
+            {job?.error && <section className="panel failure-panel">
+              <SectionHeader title="Execution Error" meta="Latest failure" actions={<span className="badge failed">{job.status}</span>} />
+              <div className="failure-message"><strong>Job execution failed.</strong><code>{job.error}</code></div>
+              <div className="decision-grid"><div><span>ATTEMPT</span><strong>{job.attempt_count} / {job.max_attempts}</strong></div>
+                <div><span>RETRY STATE</span><strong>{job.status === "QUEUED" ? "WAITING FOR RETRY" : "NOT SCHEDULED"}</strong></div>
+                <div><span>NEXT EXECUTION</span><strong>{job.status === "QUEUED" ? formatDate(job.scheduled_at) : "—"}</strong></div></div>
+            </section>}
 
             {/* Idempotency / Redis Stream / PostgreSQL State */}
             <div className="triple-grid">
               <section className="panel compact-panel">
                 <SectionHeader title="Idempotency" meta="Request deduplication" />
-                <button className="identity-key" onClick={() => setDuplicateOpen(!duplicateOpen)}><code>—</code><Icon name="chevron" size={13} /></button>
+                <button className="identity-key" onClick={() => setDuplicateOpen(!duplicateOpen)}><code>{job?.idempotency_key ?? "—"}</code><Icon name="chevron" size={13} /></button>
                 <dl>
-                  <div><dt>State</dt><dd>—</dd></div>
-                  <div><dt>First Request</dt><dd>—</dd></div>
-                  <div><dt>Duplicate Requests</dt><dd>—</dd></div>
-                  <div><dt>Resolved Job</dt><dd>—</dd></div>
+                  <div><dt>State</dt><dd>{job ? "REGISTERED" : "—"}</dd></div>
+                  <div><dt>Created</dt><dd>{formatDate(job?.created_at)}</dd></div>
+                  <div><dt>Resolved Job</dt><dd>{job?.id ?? "—"}</dd></div>
                 </dl>
-                {duplicateOpen && <div className="inline-note">Idempotency data will be loaded when connected to the backend.</div>}
+                {duplicateOpen && <div className="inline-note">The key is unique in PostgreSQL and prevents duplicate job creation.</div>}
               </section>
               <section className="panel compact-panel">
                 <SectionHeader title="Redis Stream" meta="Asynchronous delivery" />
                 <dl>
-                  <div><dt>Stream</dt><dd>—</dd></div>
-                  <div><dt>Consumer Group</dt><dd>—</dd></div>
-                  <div><dt>Consumer</dt><dd>—</dd></div>
-                  <div><dt>Message ID</dt><dd>—</dd></div>
-                  <div><dt>Delivery Count</dt><dd>—</dd></div>
-                  <div><dt>Acknowledged</dt><dd>—</dd></div>
-                  <div><dt>Pending</dt><dd>—</dd></div>
+                  <div><dt>Stream</dt><dd>job-events</dd></div>
+                  <div><dt>Consumer Group</dt><dd>job-workers</dd></div>
+                  <div><dt>Consumer</dt><dd>{job?.locked_by ?? "—"}</dd></div>
+                  <div><dt>Message ID</dt><dd>Not exposed</dd></div>
+                  <div><dt>Delivery Count</dt><dd>Not exposed</dd></div>
                 </dl>
               </section>
               <section className="panel compact-panel">
                 <SectionHeader title="PostgreSQL State" meta="Durable source of truth" />
-                <div className="db-state"><span className="status-dot" /><strong>—</strong></div>
+                <div className="db-state"><span className="status-dot" /><strong>{job ? "PERSISTED" : "—"}</strong></div>
                 <dl>
-                  <div><dt>Row Version</dt><dd>—</dd></div>
-                  <div><dt>Locked By</dt><dd>—</dd></div>
-                  <div><dt>Lock State</dt><dd>—</dd></div>
-                  <div><dt>Last Updated</dt><dd>—</dd></div>
-                  <div><dt>Outbox State</dt><dd>—</dd></div>
+                  <div><dt>Row Version</dt><dd>{job?.version ?? "—"}</dd></div>
+                  <div><dt>Locked By</dt><dd>{job?.locked_by ?? "—"}</dd></div>
+                  <div><dt>Lock State</dt><dd>{job?.locked_at ? "LEASED" : "UNLOCKED"}</dd></div>
+                  <div><dt>Last Updated</dt><dd>{formatDate(job?.updated_at)}</dd></div>
                 </dl>
               </section>
             </div>
 
-            {/* Performance Breakdown */}
-            <section className="panel performance-panel">
-              <SectionHeader title="Performance Breakdown" meta="Total lifecycle latency — awaiting data" />
-              <div className="timing-bar"><span className="queue-wait" title="Queue Wait" /><span className="claim" title="Claim" /><span className="execution" title="Execution" /><span className="persistence" title="Persistence" /></div>
-              <div className="timing-labels">
-                <div><span className="key blue" />Queue Wait<strong>—</strong></div>
-                <div><span className="key purple" />Claim<strong>—</strong></div>
-                <div><span className="key green" />Execution<strong>—</strong></div>
-                <div><span className="key cyan" />Persistence<strong>—</strong></div>
-                <div className="total">Total<strong>—</strong></div>
-              </div>
-            </section>
-
-            {/* Recovery Events */}
-            <section className="panel recovery-panel">
-              <SectionHeader title="Recovery Events" meta="Automated crash recovery and stale-job reconciliation" actions={<span className="badge pending">—</span>} />
-              <div className="recovery-flow empty-timeline">No recovery events recorded.</div>
-            </section>
-
-            {/* Event Log */}
             <section className="panel event-log">
-              <SectionHeader title="Event Log" meta="Structured lifecycle events" actions={<div className="live"><span className="status-dot pulse" />LIVE</div>} />
-              <div className="log-filters">{["ALL", "API", "POSTGRES", "REDIS", "WORKER", "RECONCILIATION"].map((item) => <button className={filter === item ? "active" : ""} onClick={() => setFilter(item)} key={item}>{item === "ALL" ? "All" : item[0] + item.slice(1).toLowerCase()}</button>)}</div>
+              <SectionHeader title="Event Log" meta={`${events.length} persisted outbox events`} />
               <div className="logs">
-                {filteredLogs.length === 0
-                  ? <div className="empty-timeline">No log events yet — awaiting job data.</div>
-                  : filteredLogs.map((row, i) => <div className="log-row" key={i}><time>{row[0]}</time><span className={`level ${row[1].toLowerCase()}`}>{row[1]}</span><span className="source">{row[2]}</span><p>{row[3]}</p><button><Icon name="more" size={14} /></button></div>)}
+                {events.length === 0
+                  ? <div className="empty-timeline">{loading ? "Loading events…" : "No outbox events recorded for this job."}</div>
+                  : events.map((event) => <div className="log-row" key={event.id}>
+                    <time>{formatDate(event.created_at)}</time>
+                    <span className={`level ${event.published ? "info" : "warn"}`}>{event.published ? "PUBLISHED" : "PENDING"}</span>
+                    <span className="source">OUTBOX</span><p>{event.event_type}</p>
+                  </div>)}
               </div>
             </section>
           </div>
@@ -292,29 +369,21 @@ export default function JobDetail() {
           {/* Right diagnostics panel */}
           <aside className="diagnostics">
             <div className="diagnostic-title"><span>JOB DIAGNOSTICS</span><button><Icon name="more" /></button></div>
-            <div className="health-block"><span>JOB HEALTH</span><strong><span className="status-dot" />—</strong><small>Awaiting data</small></div>
+            <div className="health-block"><span>JOB STATUS</span><strong><span className="status-dot" />{job?.status ?? "—"}</strong><small>{loading ? "Refreshing from PostgreSQL" : `Version ${job?.version ?? "—"}`}</small></div>
             <div className="diagnostic-list">
               <div><span>DELIVERY SEMANTICS</span><strong>At-least-once</strong><small>Duplicate delivery possible</small></div>
-              <div><span>EXECUTION</span><strong>—</strong><small>—</small></div>
+              <div><span>EXECUTION</span><strong>{job?.status ?? "—"}</strong><small>{job?.started_at ? `Started ${formatDate(job.started_at)}` : "Not started"}</small></div>
               <div><span>DATABASE</span><strong>PostgreSQL</strong><small>Durable source of truth</small></div>
               <div><span>QUEUE</span><strong>Redis Streams</strong><small>Async event delivery</small></div>
-              <div><span>WORKER</span><strong>—</strong><small>—</small></div>
-              <div><span>RETRY POLICY</span><strong>Exponential Backoff</strong><small>Full jitter · max 3 attempts</small></div>
-              <div><span>RECOVERY</span><strong>—</strong><small>—</small></div>
+              <div><span>WORKER</span><strong>{job?.locked_by ?? "—"}</strong><small>{job?.locked_at ? `Lease started ${formatDate(job.locked_at)}` : "No active worker lease"}</small></div>
+              <div><span>RETRY POLICY</span><strong>Automatic retries</strong><small>{job ? `${job.attempt_count} / ${job.max_attempts} attempts` : "—"}</small></div>
             </div>
-            <div className="architecture-note"><span>DELIVERY GUARANTEE</span><p>Transactional outbox ensures events are published after the job transaction commits. Workers may receive duplicates; idempotency keeps execution safe.</p><button>View architecture <Icon name="external" size={12} /></button></div>
+            <div className="architecture-note"><span>DELIVERY GUARANTEE</span><p>Transactional outbox ensures events are published after the job transaction commits. Workers may receive duplicates; idempotency keeps execution safe.</p><Link to="/system">View system health <Icon name="external" size={12} /></Link></div>
           </aside>
         </div>
       </main>
     </div>
 
-    {modal && <div className="modal-backdrop" onMouseDown={() => setModal(null)}><div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-      <div className={`modal-icon ${modal === "cancel" ? "danger" : "amber"}`}><Icon name={modal === "retry" ? "retry" : modal === "replay" ? "replay" : "cancel"} size={20} /></div>
-      <h2>{modal === "retry" ? "Retry this job?" : modal === "replay" ? "Replay this event?" : "Cancel this job?"}</h2>
-      <p>{modal === "retry" ? "A new execution attempt will be scheduled using the current job payload and retry policy." : modal === "replay" ? "Replaying may cause another delivery under at-least-once semantics. The idempotency key will be preserved." : "Cancellation will be recorded in the system."}</p>
-      <div className="modal-facts"><span>JOB</span><code>{shortId}</code><span>CURRENT STATE</span><strong>—</strong></div>
-      <div className="modal-actions"><button className="button" onClick={() => setModal(null)}>Keep unchanged</button><button className={`button primary ${modal === "cancel" ? "destructive" : ""}`} onClick={() => { notify(`${modal[0].toUpperCase() + modal.slice(1)} request submitted`); setModal(null); }}>Confirm {modal}</button></div>
-    </div></div>}
     {toast && <div className="toast"><Icon name="check" size={14} />{toast}</div>}
   </div>;
 }
