@@ -1,0 +1,10 @@
+{
+  "description": "Monitor and manage distributed worker fleets with real-time health, resource usage, job throughput, and scaling controls for backend and SRE teams.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
