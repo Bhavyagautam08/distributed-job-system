@@ -423,11 +423,7 @@ export default function Workers() {
     }
   }
 
-  useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 10000);
-    return () => window.clearInterval(timer);
-  }, []);
+  useEffect(() => { void refresh(); }, []);
 
   const workers: WorkerLease[] = overview?.workers ?? [];
   const visible = workers.filter((worker) => worker.id.toLowerCase().includes(search.toLowerCase()));

@@ -47,7 +47,7 @@ export default function System() {
   const [ready, setReady] = useState<ReadyResponse | null>(null);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [autoRefresh, setAutoRefresh] = useState(false);
   const [error, setError] = useState("");
   const [checkedAt, setCheckedAt] = useState<string | null>(null);
   const [quickSearch, setQuickSearch] = useState("");

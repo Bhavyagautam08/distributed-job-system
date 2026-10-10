@@ -1,11 +1,23 @@
-import { calculatePrimesHandler } from './calculate-primes.handler.js';
-import { cpuIntensiveHandler } from './cpu-intensive.handler.js';
-import { longRunningHandler } from './long-running.handler.js';
-import { processJsonHandler } from './process-json.handler.js';
+import { calculatePrimes } from "./calculate-primes.handler.js";
+import { processJson } from "./process-json.handler.js";
+import { cpuIntensive } from "./cpu-intensive.handler.js";
+import { longRunning } from "./long-running.handler.js";
 
-export const handlers = {
-    'CALCULATE_PRIMES': calculatePrimesHandler,
-    'CPU_INTENSIVE': cpuIntensiveHandler,
-    'LONG_RUNNING': longRunningHandler,
-    'PROCESS_JSON': processJsonHandler
-};
+const handlers = Object.freeze({
+    calculate_primes: calculatePrimes,
+    process_json: processJson,
+    cpu_intensive: cpuIntensive,
+    long_running: longRunning
+});
+
+export function getJobHandler(jobType) {
+    const handler = handlers[jobType];
+
+    if (!handler) {
+        throw new Error(
+            `No handler registered for job type: ${jobType}`
+        );
+    }
+
+    return handler;
+}

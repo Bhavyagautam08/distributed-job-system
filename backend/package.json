@@ -8,6 +8,7 @@
     "dev": "nodemon server.js",
     "start": "node server.js",
     "worker": "node src/workers/worker.js",
+    "bench:api": "node benchmarks/api-health.js",
     "bench:jobs": "node benchmarks/jobs-autocannon.js",
     "workers:start": "node benchmarks/start-worker-pool.js",
     "workers:report": "node benchmarks/collect-workers-report.js",

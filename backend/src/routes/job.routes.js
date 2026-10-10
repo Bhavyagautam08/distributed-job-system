@@ -1,23 +1,55 @@
-import { Router } from "express";
-import { validateJobCreation } from "../middleware/validate-job.middleware.js";
 import {
-    cancelJobController,
+    Router
+} from "express";
+
+import {
+    validateJobCreation
+} from "../middleware/validate-job.middleware.js";
+
+import {
+    rateLimit
+} from "../middleware/rate-limit.middleware.js";
+
+import {
     createJobController,
     getJobController,
     getJobsController,
-    retryJobController
+    retryJobController,
+    cancelJobController
 } from "../controllers/job.controller.js";
 
-const router = Router();
+const router =
+    Router();
 
-router.get("/", getJobsController);
 router.post(
     "/",
+
+    rateLimit,
+
     validateJobCreation,
+
     createJobController
 );
-router.get("/:id", getJobController);
-router.post("/:id/retry", retryJobController);
-router.post("/:id/cancel", cancelJobController);
+
+router.get(
+    "/",
+    getJobsController
+);
+
+router.post(
+    "/:jobId/retry",
+    retryJobController
+);
+
+router.post(
+    "/:jobId/cancel",
+    cancelJobController
+);
+
+router.get(
+    "/:jobId",
+
+    getJobController
+);
 
 export default router;

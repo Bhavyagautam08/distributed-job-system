@@ -1,16 +1,16 @@
 import { pool } from "../config/database.js";
 import { JOB_STATUS } from "../utils/job-status.js";
 
-async function updateJobWithEvent({ jobId, fromStatus, toStatus, eventType, update }) {
+async function updateJobWithEvent({ jobId, userId, fromStatus, toStatus, eventType, update }) {
     const client = await pool.connect();
     try {
         await client.query("BEGIN");
         const result = await client.query(
             `UPDATE jobs
              SET ${update}
-             WHERE id = $1 AND status = $2
+             WHERE id = $1 AND status = $2 AND user_id = $4
              RETURNING *`,
-            [jobId, fromStatus, toStatus]
+            [jobId, fromStatus, toStatus, userId]
         );
         if (result.rowCount === 0) {
             await client.query("ROLLBACK");
@@ -33,9 +33,10 @@ async function updateJobWithEvent({ jobId, fromStatus, toStatus, eventType, upda
     }
 }
 
-export function retryFailedJob(jobId) {
+export function retryFailedJob(jobId, userId) {
     return updateJobWithEvent({
         jobId,
+        userId,
         fromStatus: JOB_STATUS.FAILED,
         toStatus: JOB_STATUS.QUEUED,
         eventType: "JOB_RETRY_REQUESTED",
@@ -46,9 +47,10 @@ export function retryFailedJob(jobId) {
     });
 }
 
-export function cancelQueuedJob(jobId) {
+export function cancelQueuedJob(jobId, userId) {
     return updateJobWithEvent({
         jobId,
+        userId,
         fromStatus: JOB_STATUS.QUEUED,
         toStatus: JOB_STATUS.CANCELLED,
         eventType: "JOB_CANCELLED",

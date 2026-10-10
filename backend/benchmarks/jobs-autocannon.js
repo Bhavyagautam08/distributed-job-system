@@ -1,8 +1,15 @@
 import autocannon from "autocannon";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  runtimeMetricsBetween,
+  authenticateBenchmark,
+  sampleBacklogs,
+  sampleRuntimeMetrics,
+  summarizeHttpResults,
+  writeBenchmarkReport
+} from "./report-utils.js";
 
 const SIZES = [200, 1000, 5000, 10000];
 const JOB_TYPES = [
@@ -51,6 +58,8 @@ Options:
   --confirm-upstash             Confirm the Upstash account quota was checked
   --help                        Show this help
 
+Set BENCHMARK_EMAIL and BENCHMARK_PASSWORD to an account with which to
+authenticate job submissions and capture protected runtime metrics.
 Each size is one run and gets its own run ID and idempotency keys. The test
 persists jobs and does not delete them. The Upstash estimate counts one outbox
 publish command per accepted job; worker and other application commands add to
@@ -83,7 +92,7 @@ function createPayload(type, ordinal) {
   return { durationMs: [100, 250, 500][profileIndex] };
 }
 
-function buildRequests(size, runId) {
+function buildRequests(size, runId, authCookie) {
   const perType = size / JOB_TYPES.length;
   const typeOrdinals = Object.fromEntries(JOB_TYPES.map((type) => [type, 0]));
   const requests = [];
@@ -98,6 +107,7 @@ function buildRequests(size, runId) {
         path: "/api/jobs",
         headers: {
           "content-type": "application/json",
+          cookie: authCookie,
           "Idempotency-Key": `benchmark:${runId}:${String(jobNumber).padStart(5, "0")}`
         },
         body: JSON.stringify({
@@ -176,7 +186,7 @@ async function main() {
     throw new Error("Check your Upstash account quota, then rerun with --confirm-upstash to send benchmark traffic");
   }
 
-  const [{ pool, checkDatabaseConnection }, { checkRedisConnection }] = await Promise.all([
+  const [{ pool, checkDatabaseConnection }, { checkRedisConnection, redis }] = await Promise.all([
     import("../src/config/database.js"),
     import("../src/config/redis.js")
   ]);
@@ -184,6 +194,7 @@ async function main() {
 
   try {
     await Promise.all([checkDatabaseConnection(), checkRedisConnection()]);
+    const authCookie = await authenticateBenchmark(baseUrl);
     const readiness = await fetch(new URL("/api/ready", baseUrl));
     if (!readiness.ok) {
       throw new Error(`Backend readiness check failed with HTTP ${readiness.status}`);
@@ -203,7 +214,9 @@ async function main() {
          (SELECT COUNT(*)::int FROM outbox_events WHERE published = FALSE) AS unpublished_outbox_events`
     );
     const startedAt = new Date().toISOString();
-    const allRequests = buildRequests(options.size, runId);
+    const runtimeStart = await sampleRuntimeMetrics(baseUrl, authCookie);
+    const backlogBefore = await sampleBacklogs(pool, redis);
+    const allRequests = buildRequests(options.size, runId, authCookie);
     const attempts = [];
     let remainingRequests = allRequests;
     console.log(JSON.stringify({
@@ -258,34 +271,114 @@ async function main() {
     ]));
     const totalPersisted = Object.values(persistedByType).reduce((sum, entry) => sum + entry.count, 0);
     const completedAt = new Date().toISOString();
+    const [runtimeEnd, backlogAfter, jobTimings, queueTimings, attemptTimings] = await Promise.all([
+      sampleRuntimeMetrics(baseUrl, authCookie),
+      sampleBacklogs(pool, redis),
+      pool.query(
+        `SELECT COUNT(*) FILTER (WHERE status IN ('SUCCESS', 'FAILED', 'CANCELLED'))::int AS terminal_jobs,
+                SUM(GREATEST(attempt_count - 1, 0))::int AS retry_count,
+                MIN(created_at) FILTER (WHERE status IN ('SUCCESS', 'FAILED', 'CANCELLED')) AS first_terminal_job_created_at,
+                MAX(completed_at) FILTER (WHERE status IN ('SUCCESS', 'FAILED', 'CANCELLED')) AS last_terminal_job_completed_at,
+                percentile_cont(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000)
+                  FILTER (WHERE completed_at IS NOT NULL) AS p50_end_to_end_ms,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000)
+                  FILTER (WHERE completed_at IS NOT NULL) AS p95_end_to_end_ms
+         FROM jobs
+         WHERE LEFT(idempotency_key, LENGTH($1)) = $1`,
+        [idempotencyPrefix]
+      ),
+      pool.query(
+        `SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (ja.started_at - j.created_at)) * 1000) AS p50_ms,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (ja.started_at - j.created_at)) * 1000) AS p95_ms
+         FROM jobs j
+         JOIN job_attempts ja ON ja.job_id = j.id AND ja.attempt_number = 1
+         WHERE LEFT(j.idempotency_key, LENGTH($1)) = $1`,
+        [idempotencyPrefix]
+      ),
+      pool.query(
+        `SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000) AS p50_ms,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000) AS p95_ms
+         FROM job_attempts
+         WHERE job_id IN (
+           SELECT id FROM jobs WHERE LEFT(idempotency_key, LENGTH($1)) = $1
+         )
+           AND completed_at IS NOT NULL`,
+        [idempotencyPrefix]
+      )
+    ]);
     const totalSent = attempts.reduce((sum, attempt) => sum + attempt.requests.total, 0);
     const totalNon2xx = attempts.reduce((sum, attempt) => sum + attempt.non2xx, 0);
+    const httpMetrics = summarizeHttpResults(attempts);
+    const jobTiming = jobTimings.rows[0];
+    const queueTiming = queueTimings.rows[0];
+    const attemptTiming = attemptTimings.rows[0];
+    const terminalJobElapsedSeconds = jobTiming.first_terminal_job_created_at && jobTiming.last_terminal_job_completed_at
+      ? (new Date(jobTiming.last_terminal_job_completed_at) - new Date(jobTiming.first_terminal_job_created_at)) / 1000
+      : null;
+    const passed = totalPersisted === options.size
+      && JOB_TYPES.every((type) => persistedByType[type]?.count === typeCounts[type]
+        && persistedByType[type]?.distinctKeys === typeCounts[type])
+      && remainingRequests.length === 0;
     const report = {
       ...plan,
       baseUrl: baseUrl.origin,
-      scope: "API job creation and PostgreSQL persistence; worker execution is not measured",
+      scenario: "job-submission",
+      scope: "API job creation and PostgreSQL persistence; worker execution metrics are a snapshot and may be incomplete until workers finish",
       startedAt,
       completedAt,
       databaseBefore: systemState.rows[0],
+      backlogBefore,
+      backlogAfter,
       autocannon: {
         attempts,
         requestsSent: totalSent,
-        non2xx: totalNon2xx
+        non2xx: totalNon2xx,
+        latencyPercentileScope: httpMetrics.latencyPercentileScope
+      },
+      runtime: {
+        start: runtimeStart,
+        end: runtimeEnd
+      },
+      performanceMetrics: {
+        requestsPerSecond: httpMetrics.requestsPerSecond,
+        apiLatencyP50Ms: httpMetrics.latencyP50Ms,
+        apiLatencyP95Ms: httpMetrics.latencyP95Ms,
+        apiLatencyP99Ms: httpMetrics.latencyP99Ms,
+        apiLatencyMeasurementScope: httpMetrics.latencyPercentileScope,
+        failedRequests: httpMetrics.failedRequests,
+        httpErrorRatePct: httpMetrics.httpErrorRatePct,
+        http5xx: httpMetrics.http5xx,
+        expected429: passed ? httpMetrics.unexpected429 : 0,
+        unexpected429: passed ? 0 : httpMetrics.unexpected429,
+        transportErrors: httpMetrics.transportErrors,
+        jobSubmissionLatencyP50Ms: httpMetrics.latencyP50Ms,
+        jobSubmissionLatencyP95Ms: httpMetrics.latencyP95Ms,
+        jobSubmissionLatencyP99Ms: httpMetrics.latencyP99Ms,
+        terminalJobsPerSecond: terminalJobElapsedSeconds > 0
+          ? Number((Number(jobTiming.terminal_jobs) / terminalJobElapsedSeconds).toFixed(3))
+          : null,
+        queueWaitP50Ms: queueTiming.p50_ms === null ? null : Number(queueTiming.p50_ms),
+        queueWaitP95Ms: queueTiming.p95_ms === null ? null : Number(queueTiming.p95_ms),
+        attemptDurationP50Ms: attemptTiming.p50_ms === null ? null : Number(attemptTiming.p50_ms),
+        attemptDurationP95Ms: attemptTiming.p95_ms === null ? null : Number(attemptTiming.p95_ms),
+        endToEndP50Ms: jobTiming.p50_end_to_end_ms === null ? null : Number(jobTiming.p50_end_to_end_ms),
+        endToEndP95Ms: jobTiming.p95_end_to_end_ms === null ? null : Number(jobTiming.p95_end_to_end_ms),
+        retryCount: Number(jobTiming.retry_count || 0),
+        recoveryDelayMs: null,
+        recoveryDelayStatus: "not measured; no worker crash scenario was run",
+        ...backlogAfter,
+        ...runtimeMetricsBetween(runtimeStart, runtimeEnd)
       },
       persisted: {
         total: totalPersisted,
         byType: persistedByType
       },
-      passed: totalPersisted === options.size
-        && JOB_TYPES.every((type) => persistedByType[type]?.count === typeCounts[type]
-          && persistedByType[type]?.distinctKeys === typeCounts[type])
-        && remainingRequests.length === 0
+      passed
     };
     const resultsDirectory = join(SCRIPT_DIRECTORY, "results");
     const reportPath = join(resultsDirectory, `${runId}-${options.size}.json`);
-    await mkdir(resultsDirectory, { recursive: true });
-    await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-    console.log(JSON.stringify({ reportPath, report }, null, 2));
+    const reportFiles = await writeBenchmarkReport(reportPath, report);
+    console.log(JSON.stringify({ ...reportFiles, report }, null, 2));
 
     if (!report.passed) process.exitCode = 1;
   } finally {

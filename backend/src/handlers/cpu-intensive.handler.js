@@ -1,10 +1,24 @@
-export async function cpuIntensiveHandler(job) {
-    const { iterations = 10000000 } = job.payload || {};
+export async function cpuIntensive(payload) {
+    const iterations = Number(payload.iterations);
+
+    if (
+        !Number.isInteger(iterations) ||
+        iterations < 1
+    ) {
+        throw new Error(
+            "cpu_intensive requires a positive integer iterations value"
+        );
+    }
 
     let result = 0;
-    for (let i = 0; i < iterations; i++) {
+
+    for (let i = 1; i <= iterations; i++) {
         result += Math.sqrt(i) * Math.sin(i);
     }
 
-    return { result, iterations };
+    return {
+        iterations,
+        result,
+        completed: true
+    };
 }

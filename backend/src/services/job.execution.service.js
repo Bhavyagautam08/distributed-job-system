@@ -20,6 +20,8 @@ export async function claimJob(jobId, workerId) {
                 updated_at = NOW()
             WHERE id = $3
               AND status = $4
+              AND scheduled_at <= NOW()
+              AND attempt_count < max_attempts
             RETURNING *
             `,
             [

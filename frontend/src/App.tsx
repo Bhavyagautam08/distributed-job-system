@@ -271,10 +271,6 @@ function App() {
 
   useEffect(() => {
     void fetchRealData();
-    const interval = setInterval(() => {
-      void fetchRealData();
-    }, 10000);
-    return () => clearInterval(interval);
   }, [range]);
 
   useEffect(() => subscribeToRequestMetrics((requestMetrics) => {

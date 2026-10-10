@@ -1,5 +1,33 @@
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
+-- =========================================================
+-- USERS AND SESSIONS
+-- =========================================================
+
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR(320) NOT NULL,
+    display_name VARCHAR(100) NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower
+ON users (LOWER(email));
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    token_hash CHAR(64) PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id
+ON auth_sessions (user_id);
+
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at
+ON auth_sessions (expires_at);
+
 
 -- =========================================================
 -- JOBS
@@ -7,6 +35,8 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 CREATE TABLE IF NOT EXISTS jobs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
 
     type VARCHAR(50) NOT NULL,
 
@@ -16,7 +46,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 
     priority INTEGER NOT NULL DEFAULT 0,
 
-    idempotency_key VARCHAR(255) NOT NULL UNIQUE,
+    idempotency_key VARCHAR(255) NOT NULL,
 
     attempt_count INTEGER NOT NULL DEFAULT 0,
 
@@ -27,6 +57,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     error TEXT,
 
     scheduled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    retry_event_published BOOLEAN NOT NULL DEFAULT TRUE,
 
     started_at TIMESTAMPTZ,
 
@@ -49,6 +81,18 @@ CREATE TABLE IF NOT EXISTS jobs (
         CHECK (max_attempts > 0)
 );
 
+ALTER TABLE jobs
+ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE CASCADE;
+
+ALTER TABLE jobs
+ADD COLUMN IF NOT EXISTS retry_event_published BOOLEAN NOT NULL DEFAULT TRUE;
+
+ALTER TABLE jobs
+DROP CONSTRAINT IF EXISTS jobs_idempotency_key_key;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_user_idempotency_key
+ON jobs (user_id, idempotency_key);
+
 
 -- =========================================================
 -- JOB INDEXES
@@ -65,6 +109,9 @@ ON jobs(scheduled_at);
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_scheduled_priority
 ON jobs(status, scheduled_at, priority DESC);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_retry_scheduler
+ON jobs(status, scheduled_at, retry_event_published);
 
 
 -- =========================================================

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Link, NavLink, Outlet } from "react-router-dom";
+import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { getOverview } from "./api/dashboard";
 import { getHealth, getReady } from "./api/system";
 import type { HealthResponse, ReadyResponse } from "./api/system";
+import { useAuth } from "./auth/AuthContext";
 import "./global-layout.css";
 
 const navigation = [
@@ -31,9 +32,12 @@ const navigation = [
 ];
 
 export default function GlobalLayout() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [ready, setReady] = useState<ReadyResponse | null>(null);
   const [activeWorkers, setActiveWorkers] = useState<number | null>(null);
+  const [logoutError, setLogoutError] = useState("");
 
   useEffect(() => {
     let mounted = true;
@@ -49,10 +53,8 @@ export default function GlobalLayout() {
       setActiveWorkers(overviewResult.status === "fulfilled" ? overviewResult.value.activeWorkers : null);
     };
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 10000);
     return () => {
       mounted = false;
-      window.clearInterval(timer);
     };
   }, []);
 
@@ -61,6 +63,16 @@ export default function GlobalLayout() {
     : health.status === "healthy"
       && ready.checks.database === "up"
       && ready.checks.redis === "up";
+
+  const handleLogout = async () => {
+    setLogoutError("");
+    try {
+      await logout();
+      navigate("/auth", { replace: true });
+    } catch (error: unknown) {
+      setLogoutError(error instanceof Error ? error.message : "Unable to sign out.");
+    }
+  };
 
   return (
     <>
@@ -95,6 +107,14 @@ export default function GlobalLayout() {
           <div><span>Postgres</span><strong>{ready?.checks.database.toUpperCase() ?? "UNKNOWN"}</strong></div>
           <div><span>Redis</span><strong>{ready?.checks.redis.toUpperCase() ?? "UNKNOWN"}</strong></div>
           <div><span>Workers</span><strong>{activeWorkers ?? "—"}</strong></div>
+        </div>
+        <div className="shared-account">
+          <div className="shared-account-copy">
+            <strong>{user?.displayName}</strong>
+            <span>{user?.email}</span>
+          </div>
+          <button type="button" onClick={handleLogout}>Sign out</button>
+          {logoutError && <p role="alert">{logoutError}</p>}
         </div>
       </aside>
       <div className="shared-route-content"><Outlet /></div>

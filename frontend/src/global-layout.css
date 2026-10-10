@@ -109,6 +109,14 @@
   color: #5e6978;
 }
 .shared-status strong { color: #8b96a5; font-weight: 500; }
+.shared-account { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 12px 14px; border-top: 1px solid #252d38; }
+.shared-account-copy { min-width: 0; }
+.shared-account-copy strong, .shared-account-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shared-account-copy strong { color: #dce2eb; font-size: 11px; font-weight: 600; }
+.shared-account-copy span { margin-top: 3px; color: #758092; font-size: 9px; }
+.shared-account button { padding: 6px 8px; border: 1px solid #303a48; border-radius: 3px; color: #aab4c2; background: #11161d; font: inherit; font-size: 10px; cursor: pointer; }
+.shared-account button:hover { color: #fff; border-color: #6c8cff; }
+.shared-account p { grid-column: 1 / -1; margin: 0; color: #ff9ba2; font-size: 10px; }
 .shared-route-content { min-width: 0; min-height: 100vh; margin-left: 240px; }
 .shared-route-content .all-jobs-sidebar,
 .shared-route-content .jd-sidebar,

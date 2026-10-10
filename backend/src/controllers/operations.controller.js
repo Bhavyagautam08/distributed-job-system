@@ -67,7 +67,7 @@ export function metricsStream(req, res) {
 
 export async function dashboardSnapshot(req, res, next) {
     try {
-        const data = await getDashboardData(req.query.range || "15m");
+        const data = await getDashboardData(req.user.id, req.query.range || "15m");
         return res.json({ success: true, ...data, requestId: req.requestId });
     } catch (error) {
         next(error);
@@ -76,7 +76,7 @@ export async function dashboardSnapshot(req, res, next) {
 
 export async function workersSnapshot(req, res, next) {
     try {
-        const workers = await getWorkerLeases();
+        const workers = await getWorkerLeases(req.user.id);
         return res.json({
             success: true,
             workers: workers.map((worker) => ({
@@ -95,7 +95,7 @@ export async function workersSnapshot(req, res, next) {
 
 export async function queuesSnapshot(req, res, next) {
     try {
-        const data = await getQueueData();
+        const data = await getQueueData(req.user.id);
         return res.json({ success: true, ...data, requestId: req.requestId });
     } catch (error) {
         next(error);

@@ -32,7 +32,7 @@ const navItems: { name: string; icon: IconName; path: string }[] = [
 
 export default function Queues() {
   const [snapshot, setSnapshot] = useState<QueueResponse | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [autoRefresh, setAutoRefresh] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);

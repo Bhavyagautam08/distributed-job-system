@@ -15,6 +15,7 @@ export async function fetchApi(endpoint: string, options?: RequestInit) {
   const url = getApiUrl(endpoint);
   const response = await fetch(url, {
     ...options,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       ...options?.headers,

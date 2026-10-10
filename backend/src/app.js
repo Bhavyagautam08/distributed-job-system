@@ -2,6 +2,8 @@ import express from "express";
 import { randomUUID } from "crypto";
 import { errorMiddleware } from "./middleware/error.middleware.js";
 import { requestObservability } from "./middleware/request-observability.middleware.js";
+import { authenticate } from "./middleware/authenticate.middleware.js";
+import { frontendOrigin } from "./middleware/frontend-origin.middleware.js";
 import { rateLimit } from "./middleware/rate-limit.middleware.js";
 import { healthCheck } from "./controllers/health.controller.js";
 import {
@@ -13,6 +15,7 @@ import {
     workersSnapshot
 } from "./controllers/operations.controller.js";
 import jobRoutes from "./routes/job.routes.js";
+import authRoutes from "./routes/auth.routes.js";
 
 const app = express();
 
@@ -26,12 +29,18 @@ app.use((req, res, next) => {
 });
 
 app.use(requestObservability);
-app.use(rateLimit);
 
+app.use(frontendOrigin);
+
+app.get("/api/metrics", authenticate, metricsSnapshot);
+app.get("/api/metrics/stream", authenticate, metricsStream);
+
+app.use(rateLimit);
 app.get("/api/health", healthCheck);
 app.get("/api/ready", readinessCheck);
-app.get("/api/metrics", metricsSnapshot);
-app.get("/api/metrics/stream", metricsStream);
+app.use("/api/auth", authRoutes);
+
+app.use("/api", authenticate);
 app.get("/api/overview", dashboardSnapshot);
 app.get("/api/workers", workersSnapshot);
 app.get("/api/queues", queuesSnapshot);

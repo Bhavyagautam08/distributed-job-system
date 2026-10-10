@@ -2,50 +2,73 @@ import "dotenv/config";
 import { z } from "zod";
 
 const envSchema = z.object({
-    // Server
-    PORT: z.coerce.number().default(5000),
+    PORT:
+        z.coerce.number().default(5000),
 
-    // PostgreSQL
-    DATABASE_URL: z.string().min(1),
+    DATABASE_URL:
+        z.string().min(1),
 
-    // Upstash Redis
-    UPSTASH_REDIS_REST_URL: z.string().url(),
-    UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
+    UPSTASH_REDIS_REST_URL:
+        z.string().url(),
 
-    // Rate Limiting
-    RATE_LIMIT_WINDOW_SECONDS: z.coerce
-        .number()
-        .positive()
-        .default(60),
+    UPSTASH_REDIS_REST_TOKEN:
+        z.string().min(1),
 
-    RATE_LIMIT_MAX_REQUESTS: z.coerce
-        .number()
-        .positive()
-        .default(100),
+    RATE_LIMIT_WINDOW_SECONDS:
+        z.coerce.number()
+            .int()
+            .positive()
+            .default(60),
 
-    // Job Processing
-    JOB_MAX_ATTEMPTS: z.coerce
-        .number()
-        .int()
-        .positive()
-        .default(3),
+    RATE_LIMIT_MAX_REQUESTS:
+        z.coerce.number()
+            .int()
+            .positive()
+            .default(100),
 
-    // Retry / Exponential Backoff
-    BACKOFF_BASE_MS: z.coerce
-        .number()
-        .positive()
-        .default(1000),
+    SESSION_TTL_SECONDS:
+        z.coerce.number()
+            .int()
+            .positive()
+            .default(604800),
 
-    BACKOFF_MAX_MS: z.coerce
-        .number()
-        .positive()
-        .default(30000),
+    FRONTEND_ORIGIN:
+        z.string()
+            .url()
+            .optional(),
 
-    // Worker
-    WORKER_ID: z.string().min(1).default("worker-1")
+    JOB_MAX_ATTEMPTS:
+        z.coerce.number()
+            .int()
+            .positive()
+            .default(3),
+
+    BACKOFF_BASE_MS:
+        z.coerce.number()
+            .int()
+            .positive()
+            .default(1000),
+
+    BACKOFF_MAX_MS:
+        z.coerce.number()
+            .int()
+            .positive()
+            .default(30000),
+
+    WORKER_ID:
+        z.string()
+            .min(1)
+            .default("worker-1"),
+
+    WORKER_SHUTDOWN_TIMEOUT_MS:
+        z.coerce.number()
+            .int()
+            .positive()
+            .default(30000)
 });
 
-const parsedEnv = envSchema.safeParse(process.env);
+const parsedEnv =
+    envSchema.safeParse(process.env);
 
 if (!parsedEnv.success) {
     console.error(
@@ -59,4 +82,5 @@ if (!parsedEnv.success) {
     process.exit(1);
 }
 
-export const env = parsedEnv.data;
+export const env =
+    parsedEnv.data;

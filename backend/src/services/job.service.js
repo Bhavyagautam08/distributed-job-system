@@ -3,10 +3,15 @@ import { env } from "../config/env.js";
 import { JOB_STATUS } from "../utils/job-status.js";
 
 export async function createJob({
+    userId,
     type,
     payload,
     idempotencyKey
 }) {
+    if (!userId) {
+        throw new TypeError("userId is required to create a job");
+    }
+
     const client = await pool.connect();
 
     try {
@@ -15,18 +20,20 @@ export async function createJob({
         const insertResult = await client.query(
             `
             INSERT INTO jobs (
+                user_id,
                 type,
                 payload,
                 status,
                 max_attempts,
                 idempotency_key
             )
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (idempotency_key)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (user_id, idempotency_key)
             DO NOTHING
             RETURNING *
             `,
             [
+                userId,
                 type,
                 payload,
                 JOB_STATUS.QUEUED,
@@ -40,9 +47,9 @@ export async function createJob({
                 `
                 SELECT *
                 FROM jobs
-                WHERE idempotency_key = $1
+                WHERE user_id = $1 AND idempotency_key = $2
                 `,
-                [idempotencyKey]
+                [userId, idempotencyKey]
             );
 
             if (existingResult.rowCount === 0) {

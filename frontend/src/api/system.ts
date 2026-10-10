@@ -61,7 +61,7 @@ export function subscribeToRequestMetrics(
   onUpdate: (requestMetrics: RequestMetrics) => void,
   onError: (error: Error) => void
 ): () => void {
-  const source = new EventSource(getApiUrl("/api/metrics/stream"));
+  const source = new EventSource(getApiUrl("/api/metrics/stream"), { withCredentials: true });
   source.addEventListener("request-metrics", (event: MessageEvent<string>) => {
     try {
       const data: unknown = JSON.parse(event.data);

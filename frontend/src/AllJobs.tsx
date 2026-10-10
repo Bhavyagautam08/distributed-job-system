@@ -181,8 +181,6 @@ function AllJobs() {
 
   useEffect(() => {
     void fetchJobs();
-    const int = setInterval(() => void fetchJobs(), 10000);
-    return () => clearInterval(int);
   }, []);
 
   useEffect(() => {
