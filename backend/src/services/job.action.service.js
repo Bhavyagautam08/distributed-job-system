@@ -39,11 +39,12 @@ export function retryFailedJob(jobId, userId) {
         userId,
         fromStatus: JOB_STATUS.FAILED,
         toStatus: JOB_STATUS.QUEUED,
-        eventType: "JOB_RETRY_REQUESTED",
+        eventType: "JOB_RETRIED",
         update: `status = $3, max_attempts = max_attempts + 1,
                  scheduled_at = NOW(), started_at = NULL, completed_at = NULL,
                  error = NULL, locked_by = NULL,
-                 locked_at = NULL, version = version + 1, updated_at = NOW()`
+                 locked_at = NULL, retry_event_published = TRUE,
+                 version = version + 1, updated_at = NOW()`
     });
 }
 

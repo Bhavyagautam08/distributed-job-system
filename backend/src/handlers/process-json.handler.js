@@ -1,4 +1,8 @@
-export async function processJson(payload) {
+export async function processJson(jobOrPayload) {
+    const payload = (jobOrPayload && typeof jobOrPayload === "object" && "payload" in jobOrPayload)
+        ? jobOrPayload.payload
+        : jobOrPayload;
+
     if (
         payload === null ||
         typeof payload !== "object"
@@ -79,3 +83,5 @@ export async function processJson(payload) {
         processed: true
     };
 }
+
+export const processJsonHandler = processJson;

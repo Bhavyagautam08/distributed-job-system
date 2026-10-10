@@ -1,4 +1,5 @@
-export async function cpuIntensive(payload) {
+export async function cpuIntensive(jobOrPayload) {
+    const payload = jobOrPayload?.payload ?? jobOrPayload ?? {};
     const iterations = Number(payload.iterations);
 
     if (
@@ -22,3 +23,5 @@ export async function cpuIntensive(payload) {
         completed: true
     };
 }
+
+export const cpuIntensiveHandler = cpuIntensive;

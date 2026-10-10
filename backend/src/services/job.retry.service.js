@@ -35,6 +35,7 @@ export async function retryJob(jobId, errorMessage) {
                 locked_by = NULL,
                 locked_at = NULL,
                 scheduled_at = NOW() + INTERVAL '1 minute',
+                retry_event_published = FALSE,
                 version = version + 1,
                 updated_at = NOW()
             WHERE id = $3
@@ -55,22 +56,6 @@ export async function retryJob(jobId, errorMessage) {
             WHERE job_id = $3 AND attempt_number = $4
             `,
             [JOB_STATUS.FAILED, errorMessage, job.id, job.attempt_count]
-        );
-
-        await client.query(
-            `
-            INSERT INTO outbox_events (
-                event_type,
-                aggregate_id,
-                payload
-            )
-            VALUES ($1, $2, $3)
-            `,
-            [
-                "JOB_RETRIED",
-                job.id,
-                { jobId: job.id, error: errorMessage, attempt: job.attempt_count }
-            ]
         );
 
         await client.query("COMMIT");

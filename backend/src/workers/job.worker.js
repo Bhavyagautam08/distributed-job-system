@@ -47,7 +47,16 @@ async function processEvent(event) {
         // Claim the job before executing to ensure no one else is running it
         const claimedJob = await claimJob(job.id, env.WORKER_ID);
         if (!claimedJob) {
-            console.log(`[${env.WORKER_ID}] Job ${job.id} already claimed or completed`);
+            const currentJob = await getJob(job.id);
+            if (!currentJob) {
+                console.log(`[${env.WORKER_ID}] Job ${job.id} disappeared before it could be claimed`);
+            } else {
+                console.log(
+                    `[${env.WORKER_ID}] Job ${job.id} was not claimable ` +
+                    `(status=${currentJob.status}, scheduled_at=${currentJob.scheduled_at}, ` +
+                    `attempts=${currentJob.attempt_count}/${currentJob.max_attempts})`
+                );
+            }
             return;
         }
 
@@ -74,6 +83,25 @@ async function processEvent(event) {
 
     } catch (error) {
         console.error(`[${env.WORKER_ID}] Error setting up job ${job.id}:`, error);
+    }
+}
+
+async function processDueJobs() {
+    const result = await pool.query(
+        `
+        SELECT id
+        FROM jobs
+        WHERE status = 'QUEUED'
+          AND scheduled_at <= NOW()
+          AND attempt_count < max_attempts
+          AND locked_by IS NULL
+        ORDER BY priority DESC, created_at
+        LIMIT 10
+        `
+    );
+
+    for (const job of result.rows) {
+        await processEvent({ jobId: job.id });
     }
 }
 
@@ -111,6 +139,8 @@ async function startWorker() {
                     await acknowledgeJobEvent(event.streamId);
                 }
             }
+
+            await processDueJobs();
 
             if (events.length === 0) {
                 await new Promise((resolve) => setTimeout(resolve, 5000));

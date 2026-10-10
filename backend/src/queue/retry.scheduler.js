@@ -6,28 +6,28 @@ export async function scheduleRetries() {
     try {
         await client.query("BEGIN");
 
-        // Find jobs that are scheduled to run now (e.g., retries that were delayed)
+        // Publish each delayed retry once when its scheduled time arrives.
         const result = await client.query(
             `
             UPDATE jobs
             SET
-                scheduled_at = NOW(),
+                retry_event_published = TRUE,
                 updated_at = NOW()
             WHERE status = 'QUEUED'
               AND scheduled_at <= NOW()
               AND locked_by IS NULL
+              AND retry_event_published = FALSE
             RETURNING id, type, payload
             `
         );
 
-        // For each, emit an outbox event so it gets picked up by redis producer
         for (const job of result.rows) {
             await client.query(
                 `
                 INSERT INTO outbox_events (event_type, aggregate_id, payload)
                 VALUES ($1, $2, $3)
                 `,
-                ["JOB_CREATED", job.id, { jobId: job.id, type: job.type, payload: job.payload }]
+                ["JOB_RETRIED", job.id, { jobId: job.id, type: job.type, payload: job.payload }]
             );
         }
 

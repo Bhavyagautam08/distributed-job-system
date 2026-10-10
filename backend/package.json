@@ -10,9 +10,11 @@
     "worker": "node src/workers/worker.js",
     "bench:api": "node benchmarks/api-health.js",
     "bench:jobs": "node benchmarks/jobs-autocannon.js",
+    "bench:scale": "node benchmarks/worker-scaling.benchmark.js",
     "workers:start": "node benchmarks/start-worker-pool.js",
     "workers:report": "node benchmarks/collect-workers-report.js",
-    "test": "node --test"
+    "test": "node --test --test-concurrency=1",
+    "test:concurrency": "node --test tests/concurrency-and-resilience.test.js"
   },
   "dependencies": {
     "@upstash/redis": "^1.39.0",

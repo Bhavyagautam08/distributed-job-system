@@ -1,4 +1,8 @@
 {
+  "title": "JobMesh",
+  "icons": {
+    "icon": "/jobmesh.svg"
+  },
   "description": "Streamline distributed job processing with a real-time dashboard for engineers and SREs, offering insights into job metrics, system health, and worker status.",
   "robots": {
     "index": false
