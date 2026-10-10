@@ -1,7 +1,7 @@
 {
   "name": "distributed-job-system",
   "version": "1.0.0",
-  "description": "Fault-tolerant distributed job processing system built with Node.js, PostgreSQL, Redis and C++",
+  "description": "Full-stack distributed job-processing platform with a Node.js API, PostgreSQL outbox, Redis Streams, background workers, retries, and a real-time React dashboard",
   "type": "module",
   "main": "server.js",
   "scripts": {
