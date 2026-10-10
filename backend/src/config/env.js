@@ -8,6 +8,12 @@ const envSchema = z.object({
     DATABASE_URL:
         z.string().min(1),
 
+    DATABASE_POOL_MAX:
+        z.coerce.number()
+            .int()
+            .positive()
+            .default(20),
+
     UPSTASH_REDIS_REST_URL:
         z.string().url(),
 

@@ -1,5 +1,7 @@
-const windowMs = 60000;
-const maxRequests = 100;
+import { env } from "../config/env.js";
+
+const windowMs = env.RATE_LIMIT_WINDOW_SECONDS * 1000;
+const maxRequests = env.RATE_LIMIT_MAX_REQUESTS;
 const clients = new Map();
 
 export function rateLimit(req, res, next) {
